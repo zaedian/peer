@@ -1,0 +1,56 @@
+/* main.css — extracted custom styles (Tailwind utilities stay in index.html via CDN). */
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Slim dark scrollbars for chat + peer list */
+#chat-messages::-webkit-scrollbar,
+#peer-list::-webkit-scrollbar {
+  width: 8px;
+}
+#chat-messages::-webkit-scrollbar-track,
+#peer-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+#chat-messages::-webkit-scrollbar-thumb,
+#peer-list::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 8px;
+}
+#chat-messages::-webkit-scrollbar-thumb:hover,
+#peer-list::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Message entrance animation */
+#chat-messages > div {
+  animation: msg-in 0.18s ease-out;
+}
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Readonly code / link fields */
+#display-room-code,
+#display-invite-link {
+  caret-color: transparent;
+}
+
+/* Keep chat usable on small screens */
+@media (max-width: 767px) {
+  #chat-screen {
+    height: auto;
+    min-height: calc(100vh - 160px);
+  }
+}
