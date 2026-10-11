@@ -70,9 +70,9 @@ export async function ensurePeerJS() {
   );
 }
 
-function buildPeer() {
+function buildPeer(id) {
   const PeerCtor = globalThis.Peer;
-  const peer = new PeerCtor();
+  const peer = id ? new PeerCtor(id) : new PeerCtor();
   if (!peer || typeof peer.on !== 'function') {
     const desc = peer ? typeof peer : 'missing';
     throw new Error(
@@ -101,6 +101,7 @@ export class PeerManager {
    * @param {(locked:boolean)=>void} [cbs.onLockChanged]
    * @param {(username:string,fromId:string)=>void} [cbs.onNudge]
    * @param {(msg:object)=>void} [cbs.onCallSignal]
+   * @param {(msg:object)=>void} [cbs.onFileSignal]
    * @param {(call:any)=>void} [cbs.onIncomingMediaCall]
    * @param {()=>void} [cbs.onDenied]
    * @param {()=>void} [cbs.onE2EEError]
@@ -138,6 +139,16 @@ export class PeerManager {
     this._joinTimer = null;
     this._lastTypingSent = 0;
     this._lastDecryptWarn = 0;
+    // --- stable room link (survives the original host leaving) ---
+    /** Original room id from the invite link — the one permanent link. */
+    this.roomId = '';
+    /** Second Peer holding the room id after a promotion (entry point for late joiners). */
+    this.aliasPeer = null;
+    this._aliasTimer = null;
+    this._aliasTries = 0;
+    /** Join-side resilience: redials + redirect follows. */
+    this._joinTries = 0;
+    this._redirectHops = 0;
 
     this.status = (t, c) => this.cbs.onStatus?.(t, c);
     this.system = (t) => this.cbs.onSystemMessage?.(t);
@@ -218,6 +229,7 @@ export class PeerManager {
     this.peer.on('open', async (id) => {
       this.myId = id;
       this.hostId = id;
+      this.roomId = id; // the permanent room link id
       this.roomSalt = id;
       this.hostEpoch = 0;
       // Derive the password verifier now; the plaintext is dropped immediately.
@@ -269,7 +281,10 @@ export class PeerManager {
     this.myUsername = username;
     this.isHost = false;
     this.hostId = roomCode;
+    this.roomId = roomCode; // the permanent link id (may outlive the original host)
     this._joinPassword = String(opts.password || '');
+    this._joinTries = 0;
+    this._redirectHops = 0;
     this.status('Connecting to Host...', 'text-amber-400');
 
     const { hadKeyInUrl } = await this._initCrypto();
@@ -312,7 +327,24 @@ export class PeerManager {
       try { this.peer.reconnect(); } catch (_) {}
     });
 
-    this.peer.on('error', (err) => this._handlePeerError(err, { unavailableIsFatal: true }));
+    this.peer.on('error', (err) => {
+      // The room id may be briefly unclaimed while a new host takes over
+      // after the original host left — redial a few times before giving up.
+      if (err?.type === 'peer-unavailable' && !this.isHost && this._joinTries < 3) {
+        const hostConn = this.connections[this.hostId]?.conn;
+        if (!hostConn || !hostConn.open) {
+          this._joinTries += 1;
+          this.status(`Host is switching over — retrying... (${this._joinTries}/3)`, 'text-amber-400');
+          setTimeout(() => {
+            if (!this.isHost && (!this.connections[this.hostId] || !this.connections[this.hostId].conn?.open)) {
+              try { this._dialAsClient(this.hostId); } catch (_) {}
+            }
+          }, 2500);
+          return;
+        }
+      }
+      this._handlePeerError(err, { unavailableIsFatal: true });
+    });
   }
 
   /* ================= connection attach ================= */
@@ -472,6 +504,47 @@ export class PeerManager {
     }
   }
 
+  /**
+   * 1:1 file signalling + chunks. Same routing as calls: hosts send
+   * direct, guests route via the host (`to` field) which forwards.
+   */
+  sendFileSignal(partial) {
+    const msg = {
+      ...partial,
+      from: this.myId,
+      username: this.isHost ? `${this.myUsername} (Host)` : this.myUsername,
+    };
+    if (!msg.to) return false;
+    if (this.isHost) {
+      if (msg.to === this.myId) {
+        this.cbs.onFileSignal?.(msg);
+        return true;
+      }
+      const c = this.connections[msg.to]?.conn;
+      if (c && c.open) {
+        try { c.send(msg); return true; } catch (_) { return false; }
+      }
+      return false;
+    }
+    const h = this.connections[this.hostId]?.conn;
+    if (h && h.open) {
+      try { h.send(msg); return true; } catch (_) { return false; }
+    }
+    return false;
+  }
+
+  _relayFileSignal(data) {
+    // Host side: deliver to self or forward to the target peer.
+    if (data.to === this.myId) {
+      this.cbs.onFileSignal?.(data);
+      return;
+    }
+    const c = data.to && this.connections[data.to]?.conn;
+    if (c && c.open) {
+      try { c.send(data); } catch (_) {}
+    }
+  }
+
   /* ================= data handlers ================= */
 
   async handleHostData(incomingConn, data) {
@@ -493,6 +566,10 @@ export class PeerManager {
     }
     if (data.type.startsWith('call-')) {
       this._relayCallSignal(data);
+      return;
+    }
+    if (data.type.startsWith('file-')) {
+      this._relayFileSignal(data);
       return;
     }
 
@@ -572,6 +649,10 @@ export class PeerManager {
       if (!data.to || data.to === this.myId) this.cbs.onCallSignal?.(data);
       return;
     }
+    if (data.type.startsWith('file-')) {
+      if (!data.to || data.to === this.myId) this.cbs.onFileSignal?.(data);
+      return;
+    }
 
     if (data.type === 'chat') {
       const text = await this._decryptChatPayload(data);
@@ -626,6 +707,27 @@ export class PeerManager {
     } else if (data.type === 'denied') {
       this.system('Join rejected by host.');
       this.cbs.onDenied?.(data.reason || 'denied');
+    } else if (data.type === 'redirect') {
+      // Late join on the permanent room link: the alias holder points us
+      // at the live host. Follow it (capped) instead of joining the alias.
+      const target = typeof data.hostId === 'string' ? data.hostId : '';
+      if (!target || target === this.myId || this.isHost) return;
+      if (this._redirectHops >= 2 || target === this.hostId) return;
+      this._redirectHops += 1;
+      if (this._joinTimer) clearTimeout(this._joinTimer);
+      const oldHost = this.hostId;
+      const old = this.connections[oldHost];
+      try { old?.conn?.close(); } catch (_) {}
+      delete this.connections[oldHost];
+      this.hostId = target;
+      // Reseed ordering around the live host so failover keeps working.
+      this.roster = [
+        { id: target, username: 'Host', joinedAt: 0, isHost: true },
+        { id: this.myId, username: this.myUsername, joinedAt: Date.now(), isHost: false },
+      ];
+      this.mesh?.updateRoster(this.roster);
+      this.status('Found the live host — connecting...', 'text-amber-400');
+      this._dialAsClient(target);
     } else if (data.type === 'kick') {
       this.system('You have been kicked by the host.');
       this.cbs.onKicked?.();
@@ -815,6 +917,72 @@ export class PeerManager {
 
   /* ================= host migration ================= */
 
+  /**
+   * Keep the ONE shared invite link working after the original host leaves.
+   * The promoted host claims the original room id with a second Peer and
+   * redirects late joiners to its live id. Retries with backoff: the id
+   * frees up a few seconds after the old host disconnects, and only one
+   * claimant can hold it.
+   */
+  holdRoomAlias() {
+    if (!this.isHost || !this.roomId || this.roomId === this.myId) return;
+    this.releaseRoomAlias();
+    this._aliasTries = 0;
+    const claim = () => {
+      if (!this.isHost || this.aliasPeer) return;
+      let peer = null;
+      try {
+        peer = buildPeer(this.roomId);
+      } catch (_) {
+        return;
+      }
+      this.aliasPeer = peer;
+      peer.on('open', () => {
+        this._aliasTries = 0;
+      });
+      peer.on('connection', (conn) => {
+        // Entry point only: point the late joiner at the live host id.
+        try {
+          conn.on('open', () => {
+            try {
+              conn.send({ type: 'redirect', hostId: this.myId, epoch: this.hostEpoch, roomId: this.roomId });
+            } catch (_) {}
+            setTimeout(() => { try { conn.close(); } catch (_) {} }, 800);
+          });
+        } catch (_) {}
+      });
+      peer.on('disconnected', () => {
+        try { peer.reconnect(); } catch (_) {}
+      });
+      peer.on('error', (err) => {
+        if (err?.type === 'unavailable-id') {
+          // Someone else holds the room id (original host still alive or a
+          // racing successor won). Back off and retry while we're host.
+          try { peer.destroy(); } catch (_) {}
+          if (this.aliasPeer === peer) this.aliasPeer = null;
+          this._aliasTries += 1;
+          if (this.isHost && this._aliasTries <= 6) {
+            if (this._aliasTimer) clearTimeout(this._aliasTimer);
+            const delay = 2000 * this._aliasTries + Math.floor(Math.random() * 1000);
+            this._aliasTimer = setTimeout(claim, delay);
+          }
+          return;
+        }
+        // Other alias errors are non-fatal (main peer is unaffected).
+      });
+    };
+    claim();
+  }
+
+  releaseRoomAlias() {
+    if (this._aliasTimer) clearTimeout(this._aliasTimer);
+    this._aliasTimer = null;
+    if (this.aliasPeer) {
+      try { this.aliasPeer.destroy(); } catch (_) {}
+      this.aliasPeer = null;
+    }
+  }
+
   promoteToHost() {
     if (this.isHost) return;
     if (this._failoverWaitTimer) clearTimeout(this._failoverWaitTimer);
@@ -852,6 +1020,9 @@ export class PeerManager {
     this.mesh?.announcePromotion(this.myId, this.hostEpoch);
     this.broadcastUserList();
     this._renderHostList();
+    // Hold the permanent room link so late joiners with the old invite
+    // still land here (redirected from the room id to this live host).
+    this.holdRoomAlias();
     // Re-announce shortly after dials open (dials complete async).
     setTimeout(() => {
       this.mesh?.announcePromotion(this.myId, this.hostEpoch);
@@ -862,6 +1033,7 @@ export class PeerManager {
   adoptNewHost(newHostId, epoch = 0) {
     if (!newHostId || newHostId === this.myId || newHostId === this.hostId) return;
     if (this.isHost) return; // two hosts should never happen; ignore foreign claims
+    this.releaseRoomAlias(); // only the live host holds the room entry point
     // Light anti-spoofing: only adopt hosts already in our roster.
     if (this.roster.length && !this.roster.some((m) => m.id === newHostId)) return;
     // Stale-takeover protection: ignore announcements older than our host,
@@ -937,6 +1109,7 @@ export class PeerManager {
     } catch (_) {}
     try { this.mesh?.stop(); } catch (_) {}
     this._stopHostPrune();
+    this.releaseRoomAlias();
     if (this._failoverWaitTimer) clearTimeout(this._failoverWaitTimer);
     if (this._joinTimer) clearTimeout(this._joinTimer);
     this._joinPassword = '';
