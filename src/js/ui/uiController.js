@@ -287,6 +287,7 @@ export function showIncoming(username, video) {
   el('incoming-call')?.classList.remove('hidden');
   const t = el('incoming-text');
   if (t) t.innerText = `${username} is calling (${video ? 'video' : 'voice'})…`;
+  el('accept-btn')?.focus();
 }
 
 export function hideIncoming() {

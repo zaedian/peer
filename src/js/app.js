@@ -190,13 +190,62 @@ function ensureCalls() {
     calls = new CallManager({
       getPeer: () => manager?.peer,
       onLocalStream: (s) => ui.attachLocalStream(s),
-      onRemoteStream: () => {
-        if (activePeer) ui.setCallStatus(activePeer.video ? 'In call' : 'In call 🎙️');
+      onRemoteStream: (s) => {
+        ui.attachRemoteStream(s);
+        if (activePeer) {
+          setCallBase(activePeer.video ? 'In call' : 'In call 🎙️');
+          startCallTimer();
+        }
       },
-      onEnded: () => ui.hideCallOverlay(),
+      onEnded: () => {
+        stopCallTimer();
+        ui.hideCallOverlay();
+        if (activePeer) {
+          ui.appendSystemMessage('Call ended.');
+          activePeer = null;
+        }
+        if (outgoing) {
+          clearTimeout(outgoing.timer);
+          outgoing = null;
+        }
+      },
     });
   }
   return calls;
+}
+
+/* ---------- call duration ticker ---------- */
+let callStart = 0;
+let callTick = null;
+let callBase = 'In call';
+
+function setCallBase(base) {
+  callBase = base;
+  renderCallTime();
+}
+
+function renderCallTime() {
+  if (!callStart) {
+    ui.setCallStatus(callBase);
+    return;
+  }
+  const s = Math.floor((Date.now() - callStart) / 1000);
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  ui.setCallStatus(`${callBase} · ${mm}:${ss}`);
+}
+
+function startCallTimer() {
+  if (callTick) return;
+  callStart = Date.now();
+  renderCallTime();
+  callTick = setInterval(renderCallTime, 1000);
+}
+
+function stopCallTimer() {
+  if (callTick) clearInterval(callTick);
+  callTick = null;
+  callStart = 0;
 }
 
 function nameFor(peerId) {
@@ -245,8 +294,7 @@ async function startOutgoing(targetId, video) {
   ui.setCallStatus('Calling…');
 }
 
-function handleCallSignal(msg) {
-  if (!msg || !msg.type) return;
+async function handleCallSignal(msg) {  if (!msg || !msg.type) return;
   const cm = ensureCalls();
   if (msg.type === 'call-invite') {
     if (!msg.from) return;
@@ -276,19 +324,41 @@ function handleCallSignal(msg) {
   } else if (msg.type === 'call-accept') {
     if (outgoing && msg.from === outgoing.to) {
       clearTimeout(outgoing.timer);
-      const { to, name, video } = outgoing;
+      const { to, name } = outgoing;
+      // Callee may have downgraded video → voice-only.
+      const video = outgoing.video && msg.video !== false;
       outgoing = null;
       activePeer = { id: to, name, video };
+      if (!video) ui.showCallOverlay(name, false);
+      setCallBase('Connecting…');
       ui.setCallStatus('Connecting…');
-      cm.startCall(to, video).then(
-        () => ui.setCallStatus(video ? 'In call' : 'In call 🎙️'),
-        (e) => {
+      try {
+        await cm.startCall(to, video);
+        setCallBase(video ? 'In call' : 'In call 🎙️');
+      } catch (e) {
+        if (video) {
+          // Camera missing/blocked → fall back to voice instead of failing.
+          try {
+            await cm.startCall(to, false);
+            activePeer.video = false;
+            ui.showCallOverlay(name, false);
+            setCallBase('In call 🎙️');
+            ui.appendSystemMessage('Camera unavailable — voice only.');
+          } catch (e2) {
+            activePeer = null;
+            stopCallTimer();
+            ui.hideCallOverlay();
+            manager?.sendCallSignal({ type: 'call-end', to });
+            ui.appendSystemMessage('Call failed: ' + (e2?.message || e2));
+          }
+        } else {
           activePeer = null;
+          stopCallTimer();
           ui.hideCallOverlay();
           manager?.sendCallSignal({ type: 'call-end', to });
           ui.appendSystemMessage('Call failed: ' + (e?.message || e));
-        },
-      );
+        }
+      }
     }
   } else if (msg.type === 'call-decline' || msg.type === 'call-end') {
     if (outgoing && msg.from === outgoing.to) {
@@ -317,7 +387,7 @@ function handleIncomingMedia(call) {
   // Expected only as the callee's leg after we accepted.
   if (activePeer && from === activePeer.id && !cm.inCall) {
     if (cm.adoptIncoming(call, from, activePeer.video)) {
-      ui.setCallStatus(activePeer.video ? 'In call' : 'In call 🎙️');
+      setCallBase(activePeer.video ? 'In call' : 'In call 🎙️');
       return;
     }
   }
@@ -340,13 +410,28 @@ async function onAcceptCall() {
   try {
     await cm.capture(inv.video);
   } catch (e) {
-    ui.hideCallOverlay();
-    manager.sendCallSignal({ type: 'call-decline', to: inv.from });
-    ui.appendSystemMessage('Mic/camera blocked: ' + (e?.message || e));
-    return;
+    if (inv.video) {
+      // Camera missing/blocked → fall back to voice instead of declining.
+      try {
+        await cm.capture(false);
+        inv.video = false;
+        ui.showCallOverlay(inv.username, false);
+        ui.appendSystemMessage('Camera unavailable — voice only.');
+      } catch (e2) {
+        ui.hideCallOverlay();
+        manager.sendCallSignal({ type: 'call-decline', to: inv.from });
+        ui.appendSystemMessage('Mic/camera blocked: ' + (e2?.message || e2));
+        return;
+      }
+    } else {
+      ui.hideCallOverlay();
+      manager.sendCallSignal({ type: 'call-decline', to: inv.from });
+      ui.appendSystemMessage('Mic/camera blocked: ' + (e?.message || e));
+      return;
+    }
   }
   activePeer = { id: inv.from, name: inv.username, video: inv.video };
-  manager.sendCallSignal({ type: 'call-accept', to: inv.from });
+  manager.sendCallSignal({ type: 'call-accept', to: inv.from, video: inv.video });
   // Safety: if the caller never dials, don't stick on "Connecting…".
   setTimeout(() => {
     if (activePeer && activePeer.id === inv.from && !calls?.inCall) {
@@ -511,6 +596,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('camera-btn')?.addEventListener('click', () => {
     try { ui.setCameraUI(!!calls?.toggleCamera()); } catch (_) {}
+  });
+
+  // Escape declines an incoming call, or hangs up an active one.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (incomingInvite) onDeclineCall();
+    else if (calls?.inCall || outgoing) endActiveCall();
   });
 
   // Enter anywhere in the lobby: join if a room code is filled, else create.
