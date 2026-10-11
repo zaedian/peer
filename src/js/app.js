@@ -5,6 +5,8 @@
 
 import { PeerManager, ensurePeerJS } from './network/peerManager.js';
 import { buildInviteLink, getRoomIdFromHash, getRoomPasswordFromHash } from './crypto/crypto.js';
+import { CallManager } from './media/calls.js';
+import { playNudge, startRing, stopRing } from './media/nudge.js';
 import * as ui from './ui/uiController.js';
 
 let manager = null;
@@ -83,9 +85,9 @@ function makeManager() {
       if (!isSelf) bumpUnread();
       hideTyping(sender);
     },
-    onHostPeerList: (view, isHost) => ui.updatePeerListUI(view, isHost),
-    onClientPeerList: (users, locked) => {
-      ui.updateClientPeerListUI(users);
+    onHostPeerList: (view, isHost, myId) => ui.updatePeerListUI(view, isHost, myId),
+    onClientPeerList: (users, locked, myId) => {
+      ui.updateClientPeerListUI(users, myId);
       ui.setLockStatus(!!locked);
     },
     onTyping: (username) => showTyping(username),
@@ -94,6 +96,12 @@ function makeManager() {
       alert(reason === 'wrong-password' ? 'Wrong room password.' : 'Join rejected by host.');
       location.reload();
     },
+    onNudge: (username) => {
+      playNudge(3);
+      ui.appendSystemMessage(`🔔 ${username} nudged the room`);
+    },
+    onCallSignal: (msg) => handleCallSignal(msg),
+    onIncomingMediaCall: (call) => handleIncomingMedia(call),
     onRoleChanged: (isHost, hostId) => {
       ui.setRoleBadge(isHost);
       const rc = isHost ? manager.myId : hostId;
@@ -166,6 +174,199 @@ function renderTyping() {
   if (!bar) return;
   const names = [...typingTimers.keys()];
   bar.innerText = names.length ? `${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} typing…` : '';
+  bar.classList.toggle('typing', names.length > 0);
+}
+
+/* ---------- voice/video calls + nudges ---------- */
+
+let calls = null;
+let outgoing = null; // { to, name, video, timer }
+let incomingInvite = null; // { from, username, video, timer }
+let activePeer = null; // { id, name, video }
+const CALL_TIMEOUT_MS = 30000;
+
+function ensureCalls() {
+  if (!calls) {
+    calls = new CallManager({
+      getPeer: () => manager?.peer,
+      onLocalStream: (s) => ui.attachLocalStream(s),
+      onRemoteStream: () => {
+        if (activePeer) ui.setCallStatus(activePeer.video ? 'In call' : 'In call 🎙️');
+      },
+      onEnded: () => ui.hideCallOverlay(),
+    });
+  }
+  return calls;
+}
+
+function nameFor(peerId) {
+  const hit = manager?.roster?.find((m) => m.id === peerId);
+  return hit ? hit.username : 'Peer';
+}
+
+function busy() {
+  return !!calls?.inCall || !!outgoing || !!incomingInvite;
+}
+
+function onNudgePressed() {
+  if (!manager) return;
+  manager.sendNudge();
+  ui.appendSystemMessage('You nudged the room 🔔');
+}
+
+async function startOutgoing(targetId, video) {
+  if (!manager || !targetId) return;
+  const cm = ensureCalls();
+  if (busy()) {
+    ui.appendSystemMessage('Already in a call.');
+    return;
+  }
+  const name = nameFor(targetId);
+  outgoing = {
+    to: targetId, name, video,
+    timer: setTimeout(() => {
+      if (!outgoing) return;
+      outgoing = null;
+      ui.hideCallOverlay();
+      ui.appendSystemMessage(`${name} didn't answer.`);
+    }, CALL_TIMEOUT_MS),
+  };
+  manager.sendCallSignal({ type: 'call-invite', to: targetId, video });
+  ui.showCallOverlay(name, video);
+  ui.setCallStatus('Calling…');
+}
+
+function handleCallSignal(msg) {
+  if (!msg || !msg.type) return;
+  const cm = ensureCalls();
+  if (msg.type === 'call-invite') {
+    if (!msg.from || busy()) {
+      if (msg.from) manager?.sendCallSignal({ type: 'call-decline', to: msg.from });
+      return;
+    }
+    incomingInvite = {
+      from: msg.from,
+      username: String(msg.username || 'Someone'),
+      video: !!msg.video,
+      timer: setTimeout(() => {
+        incomingInvite = null;
+        stopRing();
+        ui.hideIncoming();
+        ui.appendSystemMessage('Missed a call.');
+      }, CALL_TIMEOUT_MS),
+    };
+    ui.showIncoming(incomingInvite.username, incomingInvite.video);
+    startRing();
+  } else if (msg.type === 'call-accept') {
+    if (outgoing && msg.from === outgoing.to) {
+      clearTimeout(outgoing.timer);
+      const { to, name, video } = outgoing;
+      outgoing = null;
+      activePeer = { id: to, name, video };
+      ui.setCallStatus('Connecting…');
+      cm.startCall(to, video).then(
+        () => ui.setCallStatus(video ? 'In call' : 'In call 🎙️'),
+        (e) => {
+          activePeer = null;
+          ui.hideCallOverlay();
+          manager?.sendCallSignal({ type: 'call-end', to });
+          ui.appendSystemMessage('Call failed: ' + (e?.message || e));
+        },
+      );
+    }
+  } else if (msg.type === 'call-decline' || msg.type === 'call-end') {
+    if (outgoing && msg.from === outgoing.to) {
+      clearTimeout(outgoing.timer);
+      outgoing = null;
+      ui.hideCallOverlay();
+      ui.appendSystemMessage(msg.type === 'call-decline' ? 'Call declined.' : 'Call ended.');
+    } else if (incomingInvite && msg.from === incomingInvite.from) {
+      clearTimeout(incomingInvite.timer);
+      incomingInvite = null;
+      stopRing();
+      ui.hideIncoming();
+    } else if (activePeer && msg.from === activePeer.id) {
+      const nm = activePeer.name;
+      activePeer = null;
+      cm.hangup();
+      ui.hideCallOverlay();
+      ui.appendSystemMessage(`${nm} ended the call.`);
+    }
+  }
+}
+
+function handleIncomingMedia(call) {
+  const cm = ensureCalls();
+  const from = call?.peer;
+  // Expected only as the callee's leg after we accepted.
+  if (activePeer && from === activePeer.id && !cm.inCall) {
+    if (cm.adoptIncoming(call, from, activePeer.video)) {
+      ui.setCallStatus(activePeer.video ? 'In call' : 'In call 🎙️');
+      return;
+    }
+  }
+  try { call?.close(); } catch (_) {}
+}
+
+async function onAcceptCall() {
+  if (!incomingInvite || !manager) return;
+  const inv = incomingInvite;
+  incomingInvite = null;
+  clearTimeout(inv.timer);
+  stopRing();
+  ui.hideIncoming();
+  const cm = ensureCalls();
+  ui.showCallOverlay(inv.username, inv.video);
+  ui.setCallStatus('Connecting…');
+  try {
+    await cm.capture(inv.video);
+  } catch (e) {
+    ui.hideCallOverlay();
+    manager.sendCallSignal({ type: 'call-decline', to: inv.from });
+    ui.appendSystemMessage('Mic/camera blocked: ' + (e?.message || e));
+    return;
+  }
+  activePeer = { id: inv.from, name: inv.username, video: inv.video };
+  manager.sendCallSignal({ type: 'call-accept', to: inv.from });
+  // Safety: if the caller never dials, don't stick on "Connecting…".
+  setTimeout(() => {
+    if (activePeer && activePeer.id === inv.from && !calls?.inCall) {
+      endActiveCall();
+      ui.appendSystemMessage('Call failed to connect.');
+    }
+  }, 20000);
+}
+
+function onDeclineCall() {
+  if (!incomingInvite) return;
+  clearTimeout(incomingInvite.timer);
+  manager?.sendCallSignal({ type: 'call-decline', to: incomingInvite.from });
+  incomingInvite = null;
+  stopRing();
+  ui.hideIncoming();
+}
+
+function endActiveCall() {
+  stopRing();
+  ui.hideIncoming();
+  try {
+    if (outgoing) {
+      clearTimeout(outgoing.timer);
+      manager?.sendCallSignal({ type: 'call-end', to: outgoing.to });
+      outgoing = null;
+    }
+    if (incomingInvite) {
+      clearTimeout(incomingInvite.timer);
+      manager?.sendCallSignal({ type: 'call-decline', to: incomingInvite.from });
+      incomingInvite = null;
+    }
+    if (activePeer) {
+      manager?.sendCallSignal({ type: 'call-end', to: activePeer.id });
+      activePeer = null;
+    }
+    calls?.hangup();
+  } catch (_) {}
+  ui.hideCallOverlay();
 }
 
 async function onCreateRoom() {
@@ -231,6 +432,7 @@ function onCopyInvite() {
 
 function onLeaveRoom() {
   if (!confirm('Are you sure you want to leave the room?')) return;
+  try { endActiveCall(); } catch (_) {}
   try { manager?.leaveRoom(); } catch (_) {}
   location.reload();
 }
@@ -261,10 +463,35 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('copy-invite-btn')?.addEventListener('click', onCopyInvite);
   document.getElementById('leave-room-btn')?.addEventListener('click', onLeaveRoom);
 
-  // Kick buttons are rendered dynamically — one delegated listener.
+  // Peer list actions are rendered dynamically — one delegated listener.
   document.getElementById('peer-list')?.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-kick]');
-    if (btn) onKickClicked(btn.getAttribute('data-kick'));
+    const kick = e.target.closest('[data-kick]');
+    if (kick) {
+      onKickClicked(kick.getAttribute('data-kick'));
+      return;
+    }
+    const ca = e.target.closest('[data-call-audio]');
+    if (ca) {
+      startOutgoing(ca.getAttribute('data-call-audio'), false);
+      return;
+    }
+    const cv = e.target.closest('[data-call-video]');
+    if (cv) {
+      startOutgoing(cv.getAttribute('data-call-video'), true);
+      return;
+    }
+    if (e.target.closest('[data-nudge]')) onNudgePressed();
+  });
+
+  // Call controls.
+  document.getElementById('accept-btn')?.addEventListener('click', onAcceptCall);
+  document.getElementById('decline-btn')?.addEventListener('click', onDeclineCall);
+  document.getElementById('hangup-btn')?.addEventListener('click', endActiveCall);
+  document.getElementById('mute-btn')?.addEventListener('click', () => {
+    try { ui.setMuteUI(!!calls?.toggleMute()); } catch (_) {}
+  });
+  document.getElementById('camera-btn')?.addEventListener('click', () => {
+    try { ui.setCameraUI(!!calls?.toggleCamera()); } catch (_) {}
   });
 
   // Enter anywhere in the lobby: join if a room code is filled, else create.
@@ -306,6 +533,7 @@ document.addEventListener('DOMContentLoaded', () => {
   ui.focusUsername();
 
   window.addEventListener('beforeunload', () => {
+    try { endActiveCall(); } catch (_) {}
     try { manager?.leaveRoom(); } catch (_) {}
   });
 });

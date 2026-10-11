@@ -45,6 +45,7 @@
                 <li><span aria-hidden="true">🔒</span><span><b>End-to-end encrypted</b> — AES-GCM-256, key only in your link</span></li>
                 <li><span aria-hidden="true">👑</span><span><b>Self-healing rooms</b> — a new host takes over automatically</span></li>
                 <li><span aria-hidden="true">📵</span><span><b>No sign-up</b> — pick a name and go</span></li>
+                <li><span aria-hidden="true">📞</span><span><b>Calls & nudges</b> — voice, video, morse-style buzzes</span></li>
             </ul>
 
             <div class="space-y-4">
@@ -119,6 +120,35 @@
                 </form>
             </section>
 
+        </div>
+
+        <!-- INCOMING CALL PROMPT -->
+        <div id="incoming-call" class="hidden call-prompt" role="alertdialog" aria-label="Incoming call">
+            <span id="incoming-text" class="text-sm font-medium">Someone is calling…</span>
+            <div class="flex gap-2">
+                <button id="decline-btn" class="call-btn decline" aria-label="Decline call">✖</button>
+                <button id="accept-btn" class="call-btn accept" aria-label="Accept call">✔</button>
+            </div>
+        </div>
+
+        <!-- ACTIVE CALL OVERLAY -->
+        <div id="call-overlay" class="hidden call-overlay" role="dialog" aria-label="Active call">
+            <div class="call-card">
+                <div id="call-avatar" class="call-avatar"></div>
+                <div id="voice-only" class="text-xs text-slate-400">Voice call</div>
+                <h3 id="call-peer-name" class="font-bold text-lg">—</h3>
+                <p id="call-status" class="text-xs text-slate-400" role="status">Calling…</p>
+                <div class="call-videos">
+                    <video id="remote-video" autoplay playsinline class="call-video remote"></video>
+                    <video id="local-video" autoplay playsinline muted class="call-video local"></video>
+                </div>
+                <div class="call-controls">
+                    <button id="mute-btn" class="call-btn" aria-label="Mute microphone" aria-pressed="false">🎙️</button>
+                    <button id="camera-btn" class="call-btn" aria-label="Turn camera off" aria-pressed="false">📷</button>
+                    <button id="hangup-btn" class="call-btn decline" aria-label="Hang up">✖</button>
+                </div>
+                <p class="text-[11px] text-slate-500 mt-1">Calls are peer-to-peer (uses mic/camera — HTTPS required).</p>
+            </div>
         </div>
 
     </main>

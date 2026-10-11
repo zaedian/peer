@@ -94,11 +94,14 @@ export class PeerManager {
    * @param {(text:string,color?:string)=>void} cbs.onStatus
    * @param {(text:string)=>void} cbs.onSystemMessage
    * @param {(sender:string,text:string,isSelf:boolean)=>void} cbs.onChatMessage
-   * @param {(view:object,isHost:boolean)=>void} cbs.onHostPeerList
-   * @param {(users:Array,locked:boolean)=>void} cbs.onClientPeerList
+   * @param {(view:object,isHost:boolean,myId:string)=>void} cbs.onHostPeerList
+   * @param {(users:Array,locked:boolean,myId:string)=>void} cbs.onClientPeerList
    * @param {(isHost:boolean,hostId:string)=>void} cbs.onRoleChanged
    * @param {(username:string)=>void} [cbs.onTyping]
    * @param {(locked:boolean)=>void} [cbs.onLockChanged]
+   * @param {(username:string,fromId:string)=>void} [cbs.onNudge]
+   * @param {(msg:object)=>void} [cbs.onCallSignal]
+   * @param {(call:any)=>void} [cbs.onIncomingMediaCall]
    * @param {()=>void} [cbs.onDenied]
    * @param {()=>void} [cbs.onE2EEError]
    * @param {(active:boolean)=>void} [cbs.onKeepAlive]
@@ -249,6 +252,8 @@ export class PeerManager {
       this._attachHostSide(incomingConn);
     });
 
+    this.peer.on('call', (call) => this.cbs.onIncomingMediaCall?.(call));
+
     this.peer.on('disconnected', () => {
       this.status('Lost signalling connection — reconnecting...', 'text-amber-400');
       try { this.peer.reconnect(); } catch (_) {}
@@ -299,6 +304,8 @@ export class PeerManager {
       }
       this._attachClientSide(incomingConn);
     });
+
+    this.peer.on('call', (call) => this.cbs.onIncomingMediaCall?.(call));
 
     this.peer.on('disconnected', () => {
       this.status('Lost signalling connection — reconnecting...', 'text-amber-400');
@@ -417,12 +424,74 @@ export class PeerManager {
     }, 12000);
   }
 
+  /* ================= nudge + call signalling ================= */
+
+  /** Room-wide attention buzz (relayed to every peer). */
+  sendNudge() {
+    const username = this.isHost ? `${this.myUsername} (Host)` : this.myUsername;
+    if (!username) return;
+    this._sendRawToAll({ type: 'nudge', from: this.myId, username });
+  }
+
+  /**
+   * 1:1 call signalling. Hosts send direct; guests route via the host
+   * (`to` field) which forwards to the target.
+   */
+  sendCallSignal(partial) {
+    const msg = {
+      ...partial,
+      from: this.myId,
+      username: this.isHost ? `${this.myUsername} (Host)` : this.myUsername,
+    };
+    if (!msg.to) return;
+    if (this.isHost) {
+      const c = this.connections[msg.to]?.conn;
+      if (c && c.open) {
+        try { c.send(msg); } catch (_) {}
+      }
+    } else {
+      const h = this.connections[this.hostId]?.conn;
+      if (h && h.open) {
+        try { h.send(msg); } catch (_) {}
+      }
+    }
+  }
+
+  _relayCallSignal(data) {
+    // Host side: deliver to self or forward to the target peer.
+    if (data.to === this.myId) {
+      this.cbs.onCallSignal?.(data);
+      return;
+    }
+    const c = data.to && this.connections[data.to]?.conn;
+    if (c && c.open) {
+      try { c.send(data); } catch (_) {}
+    }
+  }
+
   /* ================= data handlers ================= */
 
   async handleHostData(incomingConn, data) {
     if (!data || typeof data.type !== 'string') return;
     this.mesh?.recordActivity(incomingConn.peer);
     if (this.mesh?.handleMessage(data, incomingConn.peer)) return; // PING / HOST_PROMOTED
+
+    if (data.type === 'nudge') {
+      const who = String(data.username || 'Someone').slice(0, MAX_USERNAME_LENGTH);
+      for (const peerId in this.connections) {
+        if (peerId === incomingConn.peer) continue;
+        const c = this.connections[peerId].conn;
+        if (c && c.open) {
+          try { c.send(data); } catch (_) {}
+        }
+      }
+      this.cbs.onNudge?.(who, incomingConn.peer);
+      return;
+    }
+    if (data.type.startsWith('call-')) {
+      this._relayCallSignal(data);
+      return;
+    }
 
     if (data.type === 'join') {
       const username = String(data.username || 'Anonymous').slice(0, MAX_USERNAME_LENGTH);
@@ -491,6 +560,16 @@ export class PeerManager {
     this.mesh?.recordActivity(fromId || this.hostId);
     if (this.mesh?.handleMessage(data, fromId || this.hostId)) return;
 
+    if (data.type === 'nudge') {
+      const who = String(data.username || 'Someone').slice(0, MAX_USERNAME_LENGTH);
+      this.cbs.onNudge?.(who, data.from || fromId);
+      return;
+    }
+    if (data.type.startsWith('call-')) {
+      if (!data.to || data.to === this.myId) this.cbs.onCallSignal?.(data);
+      return;
+    }
+
     if (data.type === 'chat') {
       const text = await this._decryptChatPayload(data);
       if (text === null) return;
@@ -526,7 +605,7 @@ export class PeerManager {
       this.roomPeersList = data.users || [];
       this.mesh?.recordActivity(this.hostId);
       this.mesh?.updateRoster(this.roster);
-      this.cbs.onClientPeerList?.(this.roomPeersList, this.roomLocked);
+      this.cbs.onClientPeerList?.(this.roomPeersList, this.roomLocked, this.myId);
     } else if (data.type === 'welcome') {
       // Host greeting: join using the room's true salt (post-migration safe).
       // Only honored from the active host or a known roster member.
@@ -697,7 +776,7 @@ export class PeerManager {
         view[m.id] = { username: m.username || 'Peer', isHost: false };
       }
     }
-    this.cbs.onHostPeerList?.(view, this.isHost);
+    this.cbs.onHostPeerList?.(view, this.isHost, this.myId);
   }
 
   /* ================= stale-client pruning (host only) ================= */

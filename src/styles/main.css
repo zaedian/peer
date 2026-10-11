@@ -361,8 +361,91 @@ button:focus-visible, input:focus-visible {
 .send-btn:hover { filter: brightness(1.1); }
 .send-btn:active { transform: scale(0.92); }
 
-/* ---------- scrollbars ---------- */
-#chat-messages::-webkit-scrollbar, #peer-list::-webkit-scrollbar { width: 8px; }
+.peer-actions {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+}
+.icon-btn {
+  font-size: 14px;
+  line-height: 1;
+  padding: 5px 6px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+}
+.icon-btn:hover {
+  background: rgba(148, 163, 184, 0.16);
+  border-color: var(--border);
+}
+
+/* ---------- calls ---------- */
+.call-prompt {
+  position: fixed;
+  bottom: calc(20px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--surface-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: 18px;
+  padding: 12px 16px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+  animation: msg-in 0.2s ease-out;
+}
+.call-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 6, 23, 0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  padding: 16px;
+}
+.call-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface-solid);
+  border: 1px solid var(--border-strong);
+  border-radius: 24px;
+  padding: 24px;
+  text-align: center;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+.call-avatar { display: flex; justify-content: center; margin-bottom: 6px; }
+.avatar.big { width: 64px; height: 64px; font-size: 26px; }
+.call-videos { display: flex; gap: 8px; margin: 14px 0 4px; }
+.call-video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 14px;
+  background: #000;
+  border: 1px solid var(--border);
+}
+.call-video.local { transform: scaleX(-1); }
+.call-controls { display: flex; gap: 12px; justify-content: center; margin-top: 14px; }
+.call-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 999px;
+  font-size: 20px;
+  background: rgba(148, 163, 184, 0.14);
+  border: 1px solid var(--border-strong);
+  transition: transform 0.08s, filter 0.15s;
+}
+.call-btn:hover { filter: brightness(1.2); }
+.call-btn:active { transform: scale(0.92); }
+.call-btn.accept { background: linear-gradient(135deg, #059669, #34d399); border: none; }
+.call-btn.decline { background: linear-gradient(135deg, #dc2626, #f87171); border: none; }
+#incoming-call .call-btn { width: 46px; height: 46px; font-size: 17px; }
+
+/* ---------- scrollbars ---------- */#chat-messages::-webkit-scrollbar, #peer-list::-webkit-scrollbar { width: 8px; }
 #chat-messages::-webkit-scrollbar-thumb, #peer-list::-webkit-scrollbar-thumb {
   background: #2b3a55;
   border-radius: 8px;
