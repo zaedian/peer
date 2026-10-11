@@ -244,7 +244,15 @@ export function appendSystemMessage(text) {
 /* ---------- form helpers ---------- */
 
 export function getUsernameInput() {
-  return (el('username-input').value || '').trim();
+  const joinOpen = el('join-form') && !el('join-form').classList.contains('hidden');
+  const primary = joinOpen ? el('username-input') : el('create-username-input');
+  const fallback = joinOpen ? el('create-username-input') : el('username-input');
+  return ((primary?.value || fallback?.value) || '').trim();
+}
+
+export function setUsernameInput(v) {
+  if (el('username-input')) el('username-input').value = v;
+  if (el('create-username-input')) el('create-username-input').value = v;
 }
 
 export function getRoomCodeInput() {
@@ -283,7 +291,9 @@ export function clearMessageInput() {
 }
 
 export function focusUsername() {
-  el('username-input')?.focus();
+  const joinOpen = el('join-form') && !el('join-form').classList.contains('hidden');
+  const target = joinOpen ? el('username-input') : (el('create-username-input') || el('username-input'));
+  target?.focus();
 }
 
 export function focusMessageInput() {
@@ -426,25 +436,32 @@ export function isInviteMode() {
 }
 
 /**
- * Invite-link mode: the guest arrived via #room=… link, so hide the
- * create-room path and show a focused Accept Invite flow.
+ * Lobby step: 'choice' (join vs create) | 'join' (name + code) | 'create' (name + options).
+ */
+export function showLobbyView(which) {
+  el('lobby-choice')?.classList.toggle('hidden', which !== 'choice');
+  el('join-form')?.classList.toggle('hidden', which !== 'join');
+  el('create-form')?.classList.toggle('hidden', which !== 'create');
+  if (which === 'join' || which === 'create') {
+    setTimeout(() => focusUsername(), 50);
+  }
+}
+
+/**
+ * Invite-link mode: guests land straight on the join step with the code
+ * prefilled, so it's just name + Accept Invite.
  */
 export function enterInviteMode(roomId) {
   _inviteMode = true;
+  showLobbyView('join');
   el('invite-banner')?.classList.remove('hidden');
   const chip = el('invite-room-chip');
   if (chip && roomId) chip.innerText = String(roomId).slice(0, 12) + (String(roomId).length > 12 ? '…' : '');
-  el('create-room-btn')?.classList.add('hidden');
-  el('join-divider')?.classList.add('hidden');
   el('manual-code-wrap')?.classList.add('hidden');
-  el('lobby-features')?.classList.add('hidden');
-  const title = el('lobby-title');
-  if (title) title.innerText = "You're Invited! 🎉";
-  const sub = el('lobby-subtitle');
-  if (sub) sub.innerText = 'Enter your name and accept the invite — key is already in your link.';
   const join = el('join-room-btn');
   if (join) join.innerText = 'Accept Invite ✓';
   el('show-manual-btn')?.classList.remove('hidden');
+  el('join-back-btn')?.classList.add('hidden');
   // The room code is fixed by the link — keep it out of the way.
   const code = el('room-code-input');
   if (code && roomId) {
@@ -454,21 +471,15 @@ export function enterInviteMode(roomId) {
   el('username-input')?.focus();
 }
 
-/** Back to the normal Join-or-Create lobby. */
+/** Back to the manual join step (same view, code field revealed). */
 export function exitInviteMode() {
   _inviteMode = false;
   el('invite-banner')?.classList.add('hidden');
-  el('create-room-btn')?.classList.remove('hidden');
-  el('join-divider')?.classList.remove('hidden');
   el('manual-code-wrap')?.classList.remove('hidden');
-  el('lobby-features')?.classList.remove('hidden');
-  const title = el('lobby-title');
-  if (title) title.innerText = 'Peer Chat';
-  const sub = el('lobby-subtitle');
-  if (sub) sub.innerText = 'Private P2P chat. Pick a name.';
   const join = el('join-room-btn');
   if (join) join.innerText = 'Join →';
   el('show-manual-btn')?.classList.add('hidden');
+  el('join-back-btn')?.classList.remove('hidden');
   el('room-code-input')?.removeAttribute('readonly');
 }
 

@@ -1036,6 +1036,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('create-room-btn')?.addEventListener('click', onCreateRoom);
   document.getElementById('join-room-btn')?.addEventListener('click', onJoinRoom);
+  document.getElementById('choice-join-btn')?.addEventListener('click', () => ui.showLobbyView('join'));
+  document.getElementById('choice-create-btn')?.addEventListener('click', () => ui.showLobbyView('create'));
+  document.getElementById('join-back-btn')?.addEventListener('click', () => ui.showLobbyView('choice'));
+  document.getElementById('create-back-btn')?.addEventListener('click', () => ui.showLobbyView('choice'));
   document.getElementById('chat-form')?.addEventListener('submit', onSendMessage);
   document.getElementById('copy-code-btn')?.addEventListener('click', onCopyRoomCode);
   document.getElementById('copy-invite-btn')?.addEventListener('click', onCopyInvite);
@@ -1150,13 +1154,16 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (calls?.inCall || outgoing) endActiveCall();
   });
 
-  // Enter anywhere in the lobby: invite mode always joins; otherwise
-  // join if a room code is filled, else create.
-  document.getElementById('setup-screen')?.addEventListener('keydown', (e) => {
+  // Enter in a lobby step submits that step.
+  document.getElementById('join-form')?.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    if (ui.isInviteMode() || ui.getRoomCodeInput()) onJoinRoom();
-    else onCreateRoom();
+    onJoinRoom();
+  });
+  document.getElementById('create-form')?.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    onCreateRoom();
   });
 
   document.getElementById('message-input')?.addEventListener('focus', resetUnread);
@@ -1181,17 +1188,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const stash = JSON.parse(sessionStorage.getItem(LOBBY_STASH_KEY) || 'null');
     if (stash && !prefill) {
       if (stash.name && !ui.getUsernameInput()) {
-        document.getElementById('username-input').value = stash.name;
+        ui.setUsernameInput(stash.name);
       }
       if (stash.code && !ui.getRoomCodeInput()) ui.setRoomCodeInput(stash.code);
     } else if (stash?.name && !ui.getUsernameInput()) {
-      document.getElementById('username-input').value = stash.name;
+      ui.setUsernameInput(stash.name);
     }
   } catch (_) {}
   // Returning guests skip typing: reuse the name from last time.
   if (!ui.getUsernameInput()) {
     const saved = rememberedName();
-    if (saved) document.getElementById('username-input').value = saved;
+    if (saved) ui.setUsernameInput(saved);
   }
 
   // Auto-join: invite link + known name → straight into the room.

@@ -15,31 +15,20 @@
 </head>
 <body class="min-h-screen flex flex-col font-sans">
 
-    <!-- Header -->
-    <header class="app-header p-4">
-        <div class="max-w-4xl mx-auto flex items-center justify-center gap-2.5">
-            <span class="brand-tile" aria-hidden="true">🔒</span>
-            <h1 class="brand-name text-xl">P2P Secure Chat</h1>
-            <span id="role-badge" class="role-badge guest">GUEST</span>
-        </div>
-        <div class="max-w-4xl mx-auto text-center mt-1.5 space-y-0.5">
-            <p class="text-xs text-slate-400">
-                <span id="status-dot" class="status-dot" aria-hidden="true"></span>
-                <span id="connection-status" role="status">Disconnected</span>
-            </p>
-            <p id="e2ee-status" class="e2ee off">🔓 E2EE off</p>
-            <p id="room-lock-status" class="lockstat off">🔓 Open room</p>
-        </div>
-    </header>
-
     <!-- Main Container -->
     <main class="flex-1 max-w-4xl w-full mx-auto p-4 flex flex-col">
 
         <!-- SETUP / LOBBY SCREEN -->
         <div id="setup-screen" class="my-auto lobby-card compact p-5 sm:p-6 max-w-sm w-full mx-auto">
             <div class="lobby-shield small" aria-hidden="true">🔒</div>
-            <h2 id="lobby-title" class="text-base font-bold text-center mt-2">Peer Chat</h2>
-            <p id="lobby-subtitle" class="text-xs text-center text-slate-400 mt-0.5 mb-4">Private P2P chat. Pick a name.</p>
+            <h2 id="lobby-title" class="font-bold text-center mt-2">Peer Chat</h2>
+            <div class="text-center mt-1.5 mb-4 space-y-1.5">
+                <p class="status-pill">
+                    <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+                    <span id="connection-status" role="status">Disconnected</span>
+                </p>
+                <p id="e2ee-status" class="e2ee off">🔓 E2EE off</p>
+            </div>
 
             <div id="invite-banner" class="hidden invite-banner" role="status">
                 <span class="invite-emoji" aria-hidden="true">🎉</span>
@@ -49,38 +38,45 @@
                 </div>
             </div>
 
-            <p id="lobby-features" class="trust-row" aria-label="Private encrypted peer to peer chat with calls and files">🔒 E2EE · 📞 Calls · 📁 Files</p>
+            <div id="lobby-choice" class="flex flex-col gap-2.5">
+                <button id="choice-join-btn" class="btn btn-primary">Join a room →</button>
+                <button id="choice-create-btn" class="btn btn-secondary">✨ Create a room</button>
+            </div>
 
-            <div class="space-y-3">
+            <div id="join-form" class="hidden space-y-3">
+                <p class="form-heading">Join a room</p>
                 <div>
                     <label for="username-input" class="field-label">Your Name</label>
                     <input id="username-input" type="text" maxlength="40" autocomplete="nickname" placeholder="e.g. Nova" class="field">
                 </div>
-
-                <div id="create-section" class="pt-1 flex flex-col gap-2.5">
-                    <button id="create-room-btn" class="btn btn-primary">✨ Create room</button>
-
-                    <div id="join-divider" class="divider">or join</div>
-
-                    <div id="manual-code-wrap">
-                        <label for="room-code-input" class="sr-only">Room code</label>
-                        <input id="room-code-input" type="text" placeholder="Paste room code…" class="field font-mono text-sm">
-                    </div>
-                    <button id="join-room-btn" class="btn btn-secondary">Join →</button>
-                    <button id="show-manual-btn" class="hidden btn btn-ghost">Use a different code</button>
-
-                    <details id="advanced-opts" class="advanced">
-                        <summary>Password &amp; options</summary>
-                        <div class="pt-2 space-y-2">
-                            <label for="room-password-input" class="field-label">Room Password <span class="normal-case tracking-normal text-slate-500">(optional)</span></label>
-                            <input id="room-password-input" type="password" maxlength="128" autocomplete="off" placeholder="Host sets it · guests enter it" class="field">
-                            <label class="mt-1 flex items-start gap-2 text-[11px] text-slate-400 cursor-pointer">
-                                <input id="include-pw-checkbox" type="checkbox" class="mt-0.5 accent-indigo-500">
-                                <span>Include password in invite link (off = safer)</span>
-                            </label>
-                        </div>
-                    </details>
+                <div id="manual-code-wrap">
+                    <label for="room-code-input" class="sr-only">Room code</label>
+                    <input id="room-code-input" type="text" placeholder="Paste room code…" class="field font-mono text-sm">
                 </div>
+                <button id="join-room-btn" class="btn btn-primary">Join →</button>
+                <button id="show-manual-btn" class="hidden btn btn-ghost">Use a different code</button>
+                <button id="join-back-btn" class="btn btn-ghost">← Back</button>
+            </div>
+
+            <div id="create-form" class="hidden space-y-3">
+                <p class="form-heading">Create a room</p>
+                <div>
+                    <label for="create-username-input" class="field-label">Your Name</label>
+                    <input id="create-username-input" type="text" maxlength="40" autocomplete="nickname" placeholder="e.g. Nova" class="field">
+                </div>
+                <button id="create-room-btn" class="btn btn-secondary">✨ Create room</button>
+                <details id="advanced-opts" class="advanced">
+                    <summary>Password &amp; options</summary>
+                    <div class="pt-2 space-y-2">
+                        <label for="room-password-input" class="field-label">Room Password <span class="normal-case tracking-normal text-slate-500">(optional)</span></label>
+                        <input id="room-password-input" type="password" maxlength="128" autocomplete="off" placeholder="Host sets it · guests enter it" class="field">
+                        <label class="mt-1 flex items-start gap-2 text-[11px] text-slate-400 cursor-pointer">
+                            <input id="include-pw-checkbox" type="checkbox" class="mt-0.5 accent-indigo-500">
+                            <span>Include password in invite link (off = safer)</span>
+                        </label>
+                    </div>
+                </details>
+                <button id="create-back-btn" class="btn btn-ghost">← Back</button>
             </div>
         </div>
 
