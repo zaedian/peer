@@ -25,8 +25,61 @@ import {
 import { MeshNetwork } from './meshNetwork.js';
 import { enableMobileKeepAlive, disableMobileKeepAlive } from './silentAudio.js';
 
-function peerJSGlobal() {
-  return globalThis.Peer;
+/** The primary <script> tag may be blocked (ad-blocker/offline CDN). */
+const PEERJS_FALLBACKS = [
+  'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js',
+];
+
+function peerConstructorValid() {
+  const P = globalThis.Peer;
+  return typeof P === 'function' && typeof P.prototype?.on === 'function';
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('load failed'));
+    document.head.appendChild(s);
+  });
+}
+
+/**
+ * Ensure a working PeerJS constructor, trying fallback CDNs if the
+ * primary script tag was blocked or delivered a stub.
+ * @returns {Promise<Function>} the Peer constructor
+ */
+export async function ensurePeerJS() {
+  if (peerConstructorValid()) return globalThis.Peer;
+  for (const url of PEERJS_FALLBACKS) {
+    try {
+      await loadScript(url);
+    } catch (_) {
+      continue;
+    }
+    if (peerConstructorValid()) return globalThis.Peer;
+  }
+  const P = globalThis.Peer;
+  const desc = P ? `${typeof P} (${P.name || 'anonymous'})` : 'missing';
+  throw new Error(
+    `PeerJS library failed to load (window.Peer is ${desc}). ` +
+    'Disable any ad-blocker for this page, check your connection, then reload.',
+  );
+}
+
+function buildPeer() {
+  const PeerCtor = globalThis.Peer;
+  const peer = new PeerCtor();
+  if (!peer || typeof peer.on !== 'function') {
+    const desc = peer ? typeof peer : 'missing';
+    throw new Error(
+      `PeerJS initialized incorrectly (instance is ${desc}). Reload the page and retry.`,
+    );
+  }
+  return peer;
 }
 
 export const MAX_USERNAME_LENGTH = 40;
@@ -148,7 +201,7 @@ export class PeerManager {
 
   async createRoom(username, opts = {}) {
     if (!username) throw new Error('Username required');
-    if (!peerJSGlobal()) throw new Error('PeerJS failed to load (check network/CDN).');
+    await ensurePeerJS();
     this.myUsername = username;
     this.isHost = true;
     this._joinPassword = String(opts.password || '');
@@ -157,7 +210,7 @@ export class PeerManager {
     await this._initCrypto();
     this._createMesh();
 
-    this.peer = new peerJSGlobal();
+    this.peer = buildPeer();
 
     this.peer.on('open', async (id) => {
       this.myId = id;
@@ -207,7 +260,7 @@ export class PeerManager {
   async joinRoom(username, roomCode, opts = {}) {
     if (!username) throw new Error('Username required');
     if (!roomCode) throw new Error('Room code required');
-    if (!peerJSGlobal()) throw new Error('PeerJS failed to load (check network/CDN).');
+    await ensurePeerJS();
     this.myUsername = username;
     this.isHost = false;
     this.hostId = roomCode;
@@ -217,7 +270,7 @@ export class PeerManager {
     const { hadKeyInUrl } = await this._initCrypto();
     this._createMesh();
 
-    this.peer = new peerJSGlobal();
+    this.peer = buildPeer();
 
     this.peer.on('open', (id) => {
       this.myId = id;

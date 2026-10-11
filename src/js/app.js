@@ -3,7 +3,7 @@
  * Wires uiController.js (DOM) <-> peerManager.js (PeerJS + E2EE + mesh).
  */
 
-import { PeerManager } from './network/peerManager.js';
+import { PeerManager, ensurePeerJS } from './network/peerManager.js';
 import { buildInviteLink, getRoomIdFromHash, getRoomPasswordFromHash } from './crypto/crypto.js';
 import * as ui from './ui/uiController.js';
 
@@ -249,9 +249,11 @@ globalThis.leaveRoom = onLeaveRoom;
 globalThis.kickUser = onKickClicked;
 
 document.addEventListener('DOMContentLoaded', () => {
-  if (!globalThis.Peer) {
-    ui.setStatus('Failed to load PeerJS (check connection/ad-blocker)', 'text-red-400');
-  }
+  // Preload/validate PeerJS early so failures show here, not at join time.
+  // Falls back to alternate CDNs if the primary script was blocked.
+  ensurePeerJS().catch((e) => {
+    ui.setStatus(e.message, 'text-red-400');
+  });
   document.getElementById('create-room-btn')?.addEventListener('click', onCreateRoom);
   document.getElementById('join-room-btn')?.addEventListener('click', onJoinRoom);
   document.getElementById('chat-form')?.addEventListener('submit', onSendMessage);
