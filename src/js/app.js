@@ -4,7 +4,7 @@
  */
 
 import { PeerManager, ensurePeerJS } from './network/peerManager.js';
-import { buildInviteLink, getRoomIdFromHash, getRoomPasswordFromHash } from './crypto/crypto.js';
+import { buildInviteLink, getRoomIdFromHash, getRoomPassphrase, getRoomPasswordFromHash } from './crypto/crypto.js';
 import { CallManager } from './media/calls.js';
 import { playNudge, startRing, stopRing } from './media/nudge.js';
 import * as ui from './ui/uiController.js';
@@ -149,6 +149,15 @@ function makeManager() {
       lastRoomCode = roomCode;
       lastPassphrase = manager.passphrase;
       try { sessionStorage.removeItem(LOBBY_STASH_KEY); } catch (_) {}
+      // Make the address bar itself a complete invite link (room + key), so
+      // copying the URL from the browser shares a working link — not just
+      // the key-only fragment left by key generation.
+      if (isHost) {
+        try {
+          const pw = hostPassword && ui.getIncludePwChecked() ? hostPassword : null;
+          history.replaceState(null, '', buildInviteLink(roomCode, manager.passphrase, pw));
+        } catch (_) {}
+      }
       ui.showChatScreen(roomCode);
       ui.setRoleBadge(isHost);
       ui.setE2EEStatus('on', 'shared room key');
@@ -1180,6 +1189,12 @@ document.addEventListener('DOMContentLoaded', () => {
   if (prefill) {
     ui.setRoomCodeInput(prefill);
     ui.enterInviteMode(prefill);
+  } else if (getRoomPassphrase()) {
+    // Key but no room (e.g. an address-bar copy from before room links were
+    // synced): land on the join step and ask for the code instead of the
+    // generic choice screen.
+    ui.showLobbyView('join');
+    setTimeout(() => ui.showToast('That link has no room code — paste it below.'), 400);
   }
   const prePw = getRoomPasswordFromHash();
   if (prePw) ui.setPasswordInput(prePw);
