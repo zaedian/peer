@@ -44,18 +44,29 @@ export function getRoomPassphrase() {
   const h = window.location.hash || '';
   if (h.length < 2) return null;
   const frag = h.slice(1); // strip '#'
-  // URLSearchParams-style fragment: key=...&room=...
+  if (frag.includes('=')) {
+    // Param-style fragment: key=...&room=...&pw=...
+    // An empty key= is treated as missing (never as a passphrase).
+    try {
+      return new URLSearchParams(frag).get('key') || null;
+    } catch (_) {
+      return null;
+    }
+  }
+  // Bare fragment = passphrase itself.
   try {
-    const params = new URLSearchParams(frag);
-    const k = params.get('key');
-    if (k) return k;
-  } catch (_) { /* fall through to bare fragment */ }
-  if (frag.startsWith('key=')) return decodeURIComponent(frag.slice(4));
-  // bare fragment = passphrase itself
-  try {
-    return decodeURIComponent(frag);
+    return decodeURIComponent(frag) || null;
   } catch (_) {
-    return frag;
+    return frag || null;
+  }
+}
+
+/** Remove room credentials from the URL (call on leave/room switch). */
+export function clearRoomHash() {
+  try {
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+  } catch (_) {
+    try { window.location.hash = ''; } catch (_) {}
   }
 }
 
@@ -162,10 +173,50 @@ export async function decryptMessage(encryptedObj, key) {
 }
 
 /**
- * Build a shareable invite link containing both the room id and the
- * encryption key fragment, so a guest joins with the correct key.
+ * Build a shareable invite link containing the room id + encryption key,
+ * and optionally the room password (off by default — fragment stays client-side).
  */
-export function buildInviteLink(roomId, passphrase) {
+export function buildInviteLink(roomId, passphrase, password = null) {
   const base = window.location.href.split('#')[0];
-  return `${base}#key=${encodeURIComponent(passphrase)}&room=${encodeURIComponent(roomId)}`;
+  let frag = `key=${encodeURIComponent(passphrase)}&room=${encodeURIComponent(roomId)}`;
+  if (password) frag += `&pw=${encodeURIComponent(password)}`;
+  return `${base}#${frag}`;
+}
+
+/* ---------- room password (access gate, never sent in clear) ---------- */
+
+/** SHA-256 hex digest helper. */
+export async function sha256Hex(str) {
+  const digest = await window.crypto.subtle.digest('SHA-256', _enc.encode(str));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * One-way verifier for a room password. Salt = original room/host id.
+ * The guest sends this hash; the plaintext password never leaves their device
+ * (except inside the URL fragment if the host opts into link sharing).
+ */
+export function passwordVerifier(password, salt) {
+  return sha256Hex(`${salt}::${password}`);
+}
+
+/** Length-sensitive comparison to avoid trivial timing leaks. */
+export function verifiersEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Extract a shared room password from the invite hash (#...&pw=<pw>). */
+export function getRoomPasswordFromHash() {
+  const h = window.location.hash || '';
+  if (h.length < 2) return null;
+  try {
+    const pw = new URLSearchParams(h.slice(1)).get('pw');
+    return pw || null;
+  } catch (_) {
+    return null;
+  }
 }

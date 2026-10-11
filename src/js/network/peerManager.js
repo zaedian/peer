@@ -18,6 +18,9 @@ import {
   getOrCreateRoomKey,
   getRoomPassphrase,
   clearCachedKey,
+  clearRoomHash,
+  passwordVerifier,
+  verifiersEqual,
 } from '../crypto/crypto.js';
 import { MeshNetwork } from './meshNetwork.js';
 import { enableMobileKeepAlive, disableMobileKeepAlive } from './silentAudio.js';
@@ -26,6 +29,12 @@ function peerJSGlobal() {
   return globalThis.Peer;
 }
 
+export const MAX_USERNAME_LENGTH = 40;
+export const MAX_MESSAGE_LENGTH = 2000;
+/** Host drops clients silent longer than this (no close event on mobile kills). */
+const CLIENT_PRUNE_MS = 15000;
+const PRUNE_CHECK_MS = 5000;
+
 export class PeerManager {
   /**
    * @param {object} cbs
@@ -33,15 +42,19 @@ export class PeerManager {
    * @param {(text:string)=>void} cbs.onSystemMessage
    * @param {(sender:string,text:string,isSelf:boolean)=>void} cbs.onChatMessage
    * @param {(view:object,isHost:boolean)=>void} cbs.onHostPeerList
-   * @param {(users:Array)=>void} cbs.onClientPeerList
+   * @param {(users:Array,locked:boolean)=>void} cbs.onClientPeerList
    * @param {(isHost:boolean,hostId:string)=>void} cbs.onRoleChanged
+   * @param {(username:string)=>void} [cbs.onTyping]
+   * @param {(locked:boolean)=>void} [cbs.onLockChanged]
+   * @param {()=>void} [cbs.onDenied]
+   * @param {()=>void} [cbs.onE2EEError]
    * @param {(active:boolean)=>void} [cbs.onKeepAlive]
    */
   constructor(cbs = {}) {
     this.cbs = cbs;
     this.peer = null;
-    /** peerId -> { conn, username, joinedAt } (real remote peers only) */
-    this.connections = {};
+    /** peerId -> { conn, username, joinedAt, hasJoined } (real remote peers only) */
+    this.connections = Object.create(null);
     this.myId = '';
     this.myUsername = '';
     this.isHost = false;
@@ -53,10 +66,22 @@ export class PeerManager {
     this.cryptoKey = null;
     this.passphrase = '';
     this.hadKeyInUrl = false;
+    // --- room password gate (hashes only; plaintext never stored) ---
+    this.roomLocked = false;
+    this.roomSalt = '';
+    this.passwordVerifier = null;
+    this._pwHash = null; // this client's salted verifier, sent on join
+    this._joinPassword = '';
+    // --- host epoch (stale-takeover protection) ---
+    this.hostEpoch = 0;
     this.mesh = null;
     this._msgCounter = 0;
     this._seenMsgIds = new Set();
     this._failoverWaitTimer = null;
+    this._pruneTimer = null;
+    this._joinTimer = null;
+    this._lastTypingSent = 0;
+    this._lastDecryptWarn = 0;
 
     this.status = (t, c) => this.cbs.onStatus?.(t, c);
     this.system = (t) => this.cbs.onSystemMessage?.(t);
@@ -88,18 +113,45 @@ export class PeerManager {
         else this._dialAsClient(id);
       },
       onPromotedToHost: () => this.promoteToHost(),
-      onHostChanged: (newHostId) => this.adoptNewHost(newHostId),
+      onHostChanged: (newHostId, epoch) => this.adoptNewHost(newHostId, epoch),
       onLog: (t) => this.system(t),
     });
   }
 
+  _peerErrorMessage(err) {
+    switch (err?.type) {
+      case 'browser-incompatible': return 'This browser does not support WebRTC.';
+      case 'network':
+      case 'server-error':
+      case 'socket-error': return 'Network issue reaching the signalling server. Retrying...';
+      case 'peer-unavailable': return 'Peer could not be reached (it may have left).';
+      default: return 'Peer error: ' + (err?.type || 'unknown');
+    }
+  }
+
+  _handlePeerError(err, { unavailableIsFatal } = {}) {
+    if (err?.type === 'peer-unavailable' && !unavailableIsFatal) {
+      // Expected when (re)dialling dead roster entries during failover.
+      this.system('A peer could not be reached (it may have left).');
+      return;
+    }
+    if (err?.type === 'peer-unavailable') {
+      this.status('Connection Failed', 'text-red-400');
+      this.system('Connection failed: could not find room. Check the Room Code.');
+      return;
+    }
+    this.status('Error: ' + (err?.type || 'unknown'), 'text-red-400');
+    this.system(this._peerErrorMessage(err));
+  }
+
   /* ================= room lifecycle ================= */
 
-  async createRoom(username) {
+  async createRoom(username, opts = {}) {
     if (!username) throw new Error('Username required');
     if (!peerJSGlobal()) throw new Error('PeerJS failed to load (check network/CDN).');
     this.myUsername = username;
     this.isHost = true;
+    this._joinPassword = String(opts.password || '');
     this.status('Creating P2P Room...', 'text-amber-400');
 
     await this._initCrypto();
@@ -107,15 +159,28 @@ export class PeerManager {
 
     this.peer = new peerJSGlobal();
 
-    this.peer.on('open', (id) => {
+    this.peer.on('open', async (id) => {
       this.myId = id;
       this.hostId = id;
+      this.roomSalt = id;
+      this.hostEpoch = 0;
+      // Derive the password verifier now; the plaintext is dropped immediately.
+      if (this._joinPassword) {
+        try {
+          this.passwordVerifier = await passwordVerifier(this._joinPassword, this.roomSalt);
+          this.roomLocked = true;
+        } catch (_) {
+          this.system('Password setup failed — room left unlocked.');
+        }
+      }
+      this._joinPassword = '';
       this.roster = [{ id, username: `${username} (Host)`, joinedAt: 0, isHost: true }];
       this.mesh.start();
       enableMobileKeepAlive();
       this.cbs.onKeepAlive?.(true);
       this.status('Room Active (Hosting)', 'text-emerald-400');
       this.cbs.onRoleChanged?.(true, id);
+      this._startHostPrune();
       this._renderHostList();
       this.system('Room created successfully. Share your Room Code + invite link!');
       this.cbs.onReady?.(id, true);
@@ -136,19 +201,17 @@ export class PeerManager {
       try { this.peer.reconnect(); } catch (_) {}
     });
 
-    this.peer.on('error', (err) => {
-      this.status('Error: ' + (err?.type || 'unknown'), 'text-red-400');
-      this.system('Peer error: ' + (err?.type || 'unknown'));
-    });
+    this.peer.on('error', (err) => this._handlePeerError(err));
   }
 
-  async joinRoom(username, roomCode) {
+  async joinRoom(username, roomCode, opts = {}) {
     if (!username) throw new Error('Username required');
     if (!roomCode) throw new Error('Room code required');
     if (!peerJSGlobal()) throw new Error('PeerJS failed to load (check network/CDN).');
     this.myUsername = username;
     this.isHost = false;
     this.hostId = roomCode;
+    this._joinPassword = String(opts.password || '');
     this.status('Connecting to Host...', 'text-amber-400');
 
     const { hadKeyInUrl } = await this._initCrypto();
@@ -189,14 +252,7 @@ export class PeerManager {
       try { this.peer.reconnect(); } catch (_) {}
     });
 
-    this.peer.on('error', (err) => {
-      if (err?.type === 'peer-unavailable') {
-        this.status('Connection Failed', 'text-red-400');
-        this.system('Connection failed: could not find room. Check the Room Code.');
-      } else {
-        this.status('Error: ' + (err?.type || 'unknown'), 'text-red-400');
-      }
-    });
+    this.peer.on('error', (err) => this._handlePeerError(err, { unavailableIsFatal: true }));
   }
 
   /* ================= connection attach ================= */
@@ -204,17 +260,40 @@ export class PeerManager {
   _attachHostSide(conn) {
     conn.on('data', (data) => this.handleHostData(conn, data));
     conn.on('open', () => {
-      // Outgoing dials from a (possibly newly promoted) host complete here.
-      // The client will send `join`; nothing to send yet.
+      // Greet diallers with the salt + lock state so they can join
+      // without ever sending the password in clear.
+      if (this.isHost && conn.open) {
+        try { conn.send({ type: 'welcome', salt: this.roomSalt, locked: this.roomLocked }); } catch (_) {}
+      }
     });
     conn.on('close', () => this._removeClient(conn.peer));
     conn.on('error', () => this._removeClient(conn.peer));
   }
 
+  _sendJoin(conn, salt) {
+    if (!conn || this.isHost) return;
+    const s = salt || this.hostId;
+    const send = () => {
+      try { conn.send({ type: 'join', username: this.myUsername, pwHash: this._pwHash }); } catch (_) {}
+    };
+    if (this._joinPassword) {
+      passwordVerifier(this._joinPassword, s).then(
+        (h) => { this._pwHash = h; this._joinPassword = ''; send(); },
+        () => { this._pwHash = null; send(); },
+      );
+    } else {
+      this._pwHash = null;
+      send();
+    }
+  }
+
   _attachClientSide(conn) {
     conn.on('open', () => {
       if (this.isHost) return; // role changed while dial in flight
-      try { conn.send({ type: 'join', username: this.myUsername }); } catch (_) {}
+      // Prefer the host's welcome (carries the true salt); fall back to a
+      // room-code-salted join if the greeting never arrives.
+      if (this._joinTimer) clearTimeout(this._joinTimer);
+      this._joinTimer = setTimeout(() => this._sendJoin(conn, this.hostId), 4000);
     });
     conn.on('data', (data) => this.handleClientData(data, conn.peer));
     conn.on('close', () => this._handleHostLinkClosed(conn.peer));
@@ -232,7 +311,7 @@ export class PeerManager {
       conn.on('open', () => {
         // Re-assert relay state to freshly dialled peers.
         try {
-          conn.send({ type: 'HOST_PROMOTED', newHostId: this.myId });
+          conn.send({ type: 'HOST_PROMOTED', newHostId: this.myId, epoch: this.hostEpoch });
           this._sendUserListTo(conn);
         } catch (_) {}
       });
@@ -293,41 +372,64 @@ export class PeerManager {
     if (this.mesh?.handleMessage(data, incomingConn.peer)) return; // PING / HOST_PROMOTED
 
     if (data.type === 'join') {
-      const username = String(data.username || 'Anonymous').slice(0, 40);
+      const username = String(data.username || 'Anonymous').slice(0, MAX_USERNAME_LENGTH);
+      // Password gate: compare salted verifiers, plaintext never crosses the wire.
+      if (this.roomLocked) {
+        const ok = verifiersEqual(data.pwHash, this.passwordVerifier);
+        if (!ok) {
+          try { incomingConn.send({ type: 'denied', reason: 'wrong-password' }); } catch (_) {}
+          setTimeout(() => { try { incomingConn.close(); } catch (_) {} }, 400);
+          this.system(`Rejected join from ${username} (wrong password).`);
+          return;
+        }
+      }
+      const isRejoin = !!this.connections[incomingConn.peer]?.hasJoined;
       this.connections[incomingConn.peer] = {
         conn: incomingConn,
         username,
-        joinedAt: Date.now(),
+        joinedAt: this.connections[incomingConn.peer]?.joinedAt || Date.now(),
+        hasJoined: true,
       };
       this.mesh?.recordActivity(incomingConn.peer);
       this._upsertRoster(incomingConn.peer, username, false);
-      this.system(`${username} joined the room.`);
+      if (!isRejoin) this.system(`${username} joined the room.`);
       this.broadcastUserList();
       this._renderHostList();
     } else if (data.type === 'chat') {
       const text = await this._decryptChatPayload(data);
       if (text === null) return; // error already surfaced
-      const sender = String(data.username || 'Anonymous').slice(0, 40);
+      const sender = String(data.username || 'Anonymous').slice(0, MAX_USERNAME_LENGTH);
+      const senderId = typeof data.from === 'string' ? data.from : '';
       const msgId = data.msgId;
       if (msgId) {
         if (this._seenMsgIds.has(msgId)) return;
         this._rememberMsgId(msgId);
       }
       // Relay ciphertext (not plaintext) so the relay never needs the key in clear.
-      const relay = { type: 'chat', username: sender, msgId };
+      const relay = { type: 'chat', username: sender, from: senderId, msgId };
       if (data.encrypted) relay.encrypted = data.encrypted;
       else relay.text = text; // legacy plaintext peer
-      this.cbs.onChatMessage?.(sender, text, sender === `${this.myUsername} (Host)` || sender === this.myUsername);
+      const self = senderId ? senderId === this.myId : sender === `${this.myUsername} (Host)`;
+      this.cbs.onChatMessage?.(sender, text, self);
       for (const peerId in this.connections) {
         const c = this.connections[peerId].conn;
-        if (c && c.open && peerId !== incomingConn.peer) {
-          try { c.send(relay); } catch (_) {}
-        } else if (c && c.open && peerId === incomingConn.peer) {
-          try { c.send(relay); } catch (_) {} // echo incl. sender (legacy parity)
+        if (c && c.open) {
+          try { c.send(relay); } catch (_) {} // relay to all, incl. sender (legacy parity)
         }
       }
     } else if (data.type === 'leave') {
       this._removeClient(incomingConn.peer);
+    } else if (data.type === 'typing') {
+      const who = String(data.username || 'Someone').slice(0, MAX_USERNAME_LENGTH);
+      // Relay to everyone else so all guests see it.
+      for (const peerId in this.connections) {
+        if (peerId === incomingConn.peer) continue;
+        const c = this.connections[peerId].conn;
+        if (c && c.open) {
+          try { c.send({ type: 'typing', username: who }); } catch (_) {}
+        }
+      }
+      this.cbs.onTyping?.(who);
     }
   }
 
@@ -340,12 +442,14 @@ export class PeerManager {
       const text = await this._decryptChatPayload(data);
       if (text === null) return;
       const sender = String(data.username || 'Anonymous');
+      const senderId = typeof data.from === 'string' ? data.from : '';
       const msgId = data.msgId;
       if (msgId) {
         if (this._seenMsgIds.has(msgId)) return;
         this._rememberMsgId(msgId);
       }
-      this.cbs.onChatMessage?.(sender, text, sender === this.myUsername);
+      const self = senderId ? senderId === this.myId : sender === this.myUsername;
+      this.cbs.onChatMessage?.(sender, text, self);
     } else if (data.type === 'user-list') {
       if (Array.isArray(data.roster) && data.roster.length) {
         this.roster = data.roster;
@@ -358,10 +462,35 @@ export class PeerManager {
         }));
       }
       if (data.hostId) this.hostId = data.hostId;
+      if (typeof data.epoch === 'number') this.hostEpoch = Math.max(this.hostEpoch, data.epoch);
+      if (data.salt) this.roomSalt = data.salt;
+      if (typeof data.pwVerifier === 'string') {
+        this.passwordVerifier = data.pwVerifier;
+        this.roomLocked = true;
+      } else if (typeof data.locked === 'boolean') {
+        this.roomLocked = data.locked;
+      }
       this.roomPeersList = data.users || [];
       this.mesh?.recordActivity(this.hostId);
       this.mesh?.updateRoster(this.roster);
-      this.cbs.onClientPeerList?.(this.roomPeersList);
+      this.cbs.onClientPeerList?.(this.roomPeersList, this.roomLocked);
+    } else if (data.type === 'welcome') {
+      // Host greeting: join using the room's true salt (post-migration safe).
+      // Only honored from the active host or a known roster member.
+      const known = fromId === this.hostId || this.roster.some((m) => m.id === fromId);
+      if (!known || this.isHost) return;
+      if (this._joinTimer) clearTimeout(this._joinTimer);
+      const conn = this.connections[fromId]?.conn;
+      if (conn) this._sendJoin(conn, data.salt || this.hostId);
+      if (typeof data.locked === 'boolean') {
+        this.roomLocked = data.locked;
+        this.cbs.onLockChanged?.(data.locked);
+      }
+    } else if (data.type === 'typing') {
+      this.cbs.onTyping?.(String(data.username || 'Someone').slice(0, MAX_USERNAME_LENGTH));
+    } else if (data.type === 'denied') {
+      this.system('Join rejected by host.');
+      this.cbs.onDenied?.(data.reason || 'denied');
     } else if (data.type === 'kick') {
       this.system('You have been kicked by the host.');
       this.cbs.onKicked?.();
@@ -377,8 +506,13 @@ export class PeerManager {
       if (typeof data.text === 'string') return data.text; // legacy plaintext
       throw new Error('empty payload');
     } catch (_) {
-      this.system('Could not decrypt a message (wrong room key?). Open the full invite link.');
-      this.cbs.onE2EEError?.();
+      // Throttle: a flood of bad ciphertext must not spam the log.
+      const now = Date.now();
+      if (now - this._lastDecryptWarn > 5000) {
+        this._lastDecryptWarn = now;
+        this.system('Could not decrypt a message (wrong room key?). Open the full invite link.');
+        this.cbs.onE2EEError?.();
+      }
       return null;
     }
   }
@@ -394,7 +528,7 @@ export class PeerManager {
   /* ================= messaging ================= */
 
   async sendChatMessage(text) {
-    const clean = String(text || '').trim();
+    const clean = String(text || '').trim().slice(0, MAX_MESSAGE_LENGTH);
     if (!clean) return;
     if (!this.cryptoKey) {
       this.system('Encryption not ready yet — try again in a moment.');
@@ -413,7 +547,7 @@ export class PeerManager {
       const displayName = `${this.myUsername} (Host)`;
       this.cbs.onChatMessage?.(displayName, clean, true);
       this._rememberMsgId(msgId);
-      const payload = { type: 'chat', username: displayName, encrypted, msgId };
+      const payload = { type: 'chat', username: displayName, from: this.myId, encrypted, msgId };
       for (const peerId in this.connections) {
         const c = this.connections[peerId].conn;
         if (c && c.open) {
@@ -421,16 +555,32 @@ export class PeerManager {
         }
       }
     } else {
-      const payload = { type: 'chat', username: this.myUsername, encrypted, msgId };
+      const payload = { type: 'chat', username: this.myUsername, from: this.myId, encrypted, msgId };
       const hostConn = this.connections[this.hostId]?.conn;
       if (hostConn && hostConn.open) {
-        try { hostConn.send(payload); } catch (_) {}
-        // Optimistic local echo would double up with the host relay echo;
-        // legacy build waited for the relay, so we do the same.
+        try {
+          hostConn.send(payload);
+          // Optimistic echo: the relay echo carries the same msgId and is
+          // dropped by dedup, so this can never double-render.
+          this._rememberMsgId(msgId);
+          this.cbs.onChatMessage?.(this.myUsername, clean, true);
+        } catch (_) {
+          this.system('Not connected to host — message not sent.');
+        }
       } else {
         this.system('Not connected to host — message not sent.');
       }
     }
+  }
+
+  /** Throttled "is typing" ping (relayed by the host to all guests). */
+  sendTyping() {
+    const now = Date.now();
+    if (now - this._lastTypingSent < 2500) return;
+    this._lastTypingSent = now;
+    const name = this.isHost ? `${this.myUsername} (Host)` : this.myUsername;
+    if (!name) return;
+    this._sendRawToAll({ type: 'typing', username: name });
   }
 
   /* ================= roster / user list ================= */
@@ -452,14 +602,18 @@ export class PeerManager {
     const fresh = [{ id: this.myId, username: `${this.myUsername} (Host)`, joinedAt: 0, isHost: true }];
     for (const peerId in this.connections) {
       const e = this.connections[peerId];
-      if (e.conn && (e.conn.open || !e.conn.open)) {
+      if (e.conn) {
         fresh.push({ id: peerId, username: e.username || 'Peer', joinedAt: e.joinedAt || Date.now(), isHost: false });
       }
     }
     fresh.sort((a, b) => a.joinedAt - b.joinedAt);
     this.roster = fresh;
     const users = fresh.map((m) => ({ id: m.id, username: m.username, isHost: m.isHost, joinedAt: m.joinedAt }));
-    const payload = { type: 'user-list', users, roster: fresh, hostId: this.myId };
+    const payload = {
+      type: 'user-list', users, roster: fresh, hostId: this.myId,
+      locked: this.roomLocked, salt: this.roomSalt,
+      pwVerifier: this.passwordVerifier, epoch: this.hostEpoch,
+    };
     for (const peerId in this.connections) {
       const c = this.connections[peerId].conn;
       if (c && c.open) {
@@ -472,17 +626,56 @@ export class PeerManager {
   _sendUserListTo(conn) {
     if (!this.isHost || !conn || !conn.open) return;
     const users = this.roster.map((m) => ({ id: m.id, username: m.username, isHost: m.isHost, joinedAt: m.joinedAt }));
-    try { conn.send({ type: 'user-list', users, roster: this.roster, hostId: this.myId }); } catch (_) {}
+    try {
+      conn.send({
+        type: 'user-list', users, roster: this.roster, hostId: this.myId,
+        locked: this.roomLocked, salt: this.roomSalt,
+        pwVerifier: this.passwordVerifier, epoch: this.hostEpoch,
+      });
+    } catch (_) {}
   }
 
   _renderHostList() {
-    const view = {};
+    // Show only self + peers with a live connection object (no ghosts,
+    // no dead Kick buttons).
+    const view = { [this.myId]: { username: `${this.myUsername} (Host)`, isHost: true } };
     for (const m of this.roster) {
-      if (m.id === this.myId) view[m.id] = { username: m.username, isHost: true };
-      else view[m.id] = { username: m.username || 'Peer', isHost: false };
+      if (m.id !== this.myId && this.connections[m.id]) {
+        view[m.id] = { username: m.username || 'Peer', isHost: false };
+      }
     }
-    // Legacy shape compat: also expose raw conns for kick buttons.
     this.cbs.onHostPeerList?.(view, this.isHost);
+  }
+
+  /* ================= stale-client pruning (host only) ================= */
+
+  _startHostPrune() {
+    this._stopHostPrune();
+    this._pruneTimer = setInterval(() => {
+      if (!this.isHost || !this.mesh) return;
+      const now = Date.now();
+      let changed = false;
+      for (const peerId in this.connections) {
+        const last = this.mesh.lastSeen.get(peerId) || 0;
+        if (now - last > CLIENT_PRUNE_MS) {
+          const name = this.connections[peerId].username || 'Peer';
+          try { this.connections[peerId].conn?.close(); } catch (_) {}
+          delete this.connections[peerId];
+          this.roster = this.roster.filter((m) => m.id !== peerId);
+          this.system(`${name} timed out and was removed.`);
+          changed = true;
+        }
+      }
+      if (changed) {
+        this.broadcastUserList();
+        this._renderHostList();
+      }
+    }, PRUNE_CHECK_MS);
+  }
+
+  _stopHostPrune() {
+    if (this._pruneTimer) clearInterval(this._pruneTimer);
+    this._pruneTimer = null;
   }
 
   /* ================= host migration ================= */
@@ -511,27 +704,36 @@ export class PeerManager {
     this.roster.sort((a, b) => (a.joinedAt ?? 0) - (b.joinedAt ?? 0));
 
     this.mesh?.recordActivity(this.myId);
+    this.hostEpoch += 1; // outrank any stale announcements in flight
     this.status('Room Active (Hosting — promoted)', 'text-emerald-400');
     this.cbs.onRoleChanged?.(true, this.myId);
     this.system(`Host lost. ${this.myUsername} is now hosting 👑`);
+    this._startHostPrune();
 
     // Dial every surviving roster peer, then announce.
     for (const m of this.roster) {
       if (m.id !== this.myId) this._dialAsHost(m.id);
     }
-    this.mesh?.announcePromotion(this.myId);
+    this.mesh?.announcePromotion(this.myId, this.hostEpoch);
     this.broadcastUserList();
     this._renderHostList();
     // Re-announce shortly after dials open (dials complete async).
     setTimeout(() => {
-      this.mesh?.announcePromotion(this.myId);
+      this.mesh?.announcePromotion(this.myId, this.hostEpoch);
       this.broadcastUserList();
     }, 1500);
   }
 
-  adoptNewHost(newHostId) {
+  adoptNewHost(newHostId, epoch = 0) {
     if (!newHostId || newHostId === this.myId || newHostId === this.hostId) return;
     if (this.isHost) return; // two hosts should never happen; ignore foreign claims
+    // Light anti-spoofing: only adopt hosts already in our roster.
+    if (this.roster.length && !this.roster.some((m) => m.id === newHostId)) return;
+    // Stale-takeover protection: ignore announcements older than our host,
+    // tie-break equal epochs deterministically by peer id.
+    if (epoch < this.hostEpoch) return;
+    if (epoch === this.hostEpoch && newHostId < this.hostId) return;
+    this.hostEpoch = Math.max(this.hostEpoch, epoch);
     if (this._failoverWaitTimer) clearTimeout(this._failoverWaitTimer);
     const oldHost = this.hostId;
     delete this.connections[oldHost];
@@ -599,11 +801,17 @@ export class PeerManager {
       }
     } catch (_) {}
     try { this.mesh?.stop(); } catch (_) {}
+    this._stopHostPrune();
+    if (this._failoverWaitTimer) clearTimeout(this._failoverWaitTimer);
+    if (this._joinTimer) clearTimeout(this._joinTimer);
+    this._joinPassword = '';
+    this._pwHash = null;
     try { disableMobileKeepAlive(); } catch (_) {}
     this.cbs.onKeepAlive?.(false);
     try { this.peer?.destroy(); } catch (_) {}
     clearCachedKey();
+    clearRoomHash();
     this.peer = null;
-    this.connections = {};
+    this.connections = Object.create(null);
   }
 }

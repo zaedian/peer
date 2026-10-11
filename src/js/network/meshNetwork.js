@@ -19,6 +19,8 @@
 
 export const PING_INTERVAL_MS = 2000;
 export const HOST_TIMEOUT_MS = 5000;
+/** Successors silent longer than this are skipped (cascading failover). */
+export const SUCCESSOR_STALE_MS = 10000;
 const CHECK_INTERVAL_MS = 1000;
 
 export class MeshNetwork {
@@ -105,7 +107,7 @@ export class MeshNetwork {
       this.recordActivity(fromId);
       if (msg.newHostId) {
         this.recordActivity(msg.newHostId);
-        this.deps.onHostChanged(msg.newHostId);
+        this.deps.onHostChanged(msg.newHostId, typeof msg.epoch === 'number' ? msg.epoch : 0);
       }
       return true;
     }
@@ -130,26 +132,38 @@ export class MeshNetwork {
     const last = this.lastSeen.get(hostId) || 0;
     if (Date.now() - last <= HOST_TIMEOUT_MS) return;
 
-    // Host is dead — only the next peer in the ordered array may promote.
+    // Host is dead — the earliest ALIVE successor promotes itself.
+    // Stale successors are skipped so two simultaneous deaths still fail over.
     const ordered = this.getOrderedIds();
     const hostIdx = ordered.indexOf(hostId);
-    const myIdx = ordered.indexOf(myId);
-    if (myIdx === -1) return; // not in roster yet, wait for user-list
-    const expectedIdx = hostIdx === -1 ? 0 : hostIdx + 1;
-
-    if (myIdx === expectedIdx) {
-      this.deps.onLog?.(`Host ${hostId} timed out — promoting ${myId}`);
-      // Prevent double-promotion while dials complete.
-      this.recordActivity(hostId);
-      this.deps.onPromotedToHost();
+    if (hostIdx === -1) return; // roster not synced yet — wait for user-list
+    const now = Date.now();
+    for (let i = hostIdx + 1; i < ordered.length; i++) {
+      const candidate = ordered[i];
+      if (candidate === myId) {
+        this.deps.onLog?.(`Host ${hostId} timed out — promoting ${myId}`);
+        // Prevent double-promotion while dials complete.
+        this.recordActivity(hostId);
+        this.deps.onPromotedToHost();
+        return;
+      }
+      const seen = this.lastSeen.get(candidate) || 0;
+      if (now - seen <= SUCCESSOR_STALE_MS) {
+        return; // an earlier successor is alive — its turn, not ours
+      }
+      // else: successor also stale — keep scanning down the line
     }
-    // Otherwise: not our turn; wait for the new host's HOST_PROMOTED.
+    // No live successor found and we are not in line (e.g. roster stale):
+    // stay put and wait for HOST_PROMOTED.
   }
 
-  /** Broadcast a promotion announcement (called by the new host). */
-  announcePromotion(newHostId) {
+  /**
+   * Broadcast a promotion announcement (called by the new host).
+   * The epoch lets receivers ignore stale/duplicate takeovers.
+   */
+  announcePromotion(newHostId, epoch = 0) {
     try {
-      this.deps.sendToAll({ type: 'HOST_PROMOTED', newHostId });
+      this.deps.sendToAll({ type: 'HOST_PROMOTED', newHostId, epoch });
     } catch (_) { /* ignore */ }
   }
 }

@@ -14,6 +14,15 @@ function el(id) {
   return document.getElementById(id);
 }
 
+/** Escape for use inside a double-quoted HTML attribute. */
+function escAttr(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+export function formatTime(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 export function setStatus(text, color = 'text-slate-400') {
   const node = el('connection-status');
   if (!node) return;
@@ -79,7 +88,7 @@ export function updatePeerListUI(connections, isHost) {
     li.className =
       'flex items-center justify-between text-xs py-1 px-2 rounded bg-slate-900 border border-slate-800/80';
     const kick = isHost && !user.isHost
-      ? `<button onclick="kickUser('${escapeHTML(peerId)}')" class="text-red-400 hover:text-red-300 ml-2 font-bold px-1.5 py-0.5 rounded bg-red-950/50">Kick</button>`
+      ? `<button data-kick="${escAttr(peerId)}" aria-label="Kick ${escapeHTML(user.username)}" class="text-red-400 hover:text-red-300 ml-2 font-bold px-1.5 py-0.5 rounded bg-red-950/50">Kick</button>`
       : '';
     li.innerHTML = peerRowHTML(user.username, kick);
     listEl.appendChild(li);
@@ -104,13 +113,13 @@ export function updateClientPeerListUI(users) {
 
 /* ---------- messages ---------- */
 
-export function appendChatMessage(sender, text, isSelf) {
+export function appendChatMessage(sender, text, isSelf, timeStr = formatTime()) {
   const container = el('chat-messages');
   if (!container) return;
   const div = document.createElement('div');
   div.className = `flex flex-col ${isSelf ? 'items-end' : 'items-start'}`;
   div.innerHTML = `
-    <span class="text-[10px] text-slate-400 mb-0.5 px-1">${escapeHTML(sender)}</span>
+    <span class="text-[10px] text-slate-400 mb-0.5 px-1">${escapeHTML(sender)} · ${escapeHTML(timeStr)}</span>
     <div class="max-w-[85%] px-3.5 py-2 rounded-2xl text-sm ${isSelf ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-100 rounded-bl-none'} break-words">${escapeHTML(text)}</div>
   `;
   container.appendChild(div);
@@ -141,10 +150,39 @@ export function setRoomCodeInput(v) {
   el('room-code-input').value = v;
 }
 
+export function getPasswordInput() {
+  return (el('room-password-input').value || '').trim();
+}
+
+export function setPasswordInput(v) {
+  el('room-password-input').value = v;
+}
+
+export function getIncludePwChecked() {
+  return !!el('include-pw-checkbox')?.checked;
+}
+
+export function setLockStatus(locked) {
+  const node = el('room-lock-status');
+  if (!node) return;
+  node.innerText = locked ? '🔑 Locked (password required)' : '🔓 Open room';
+  node.className = locked
+    ? 'text-[11px] text-amber-300'
+    : 'text-[11px] text-slate-500';
+}
+
 export function getMessageText() {
   return (el('message-input').value || '').trim();
 }
 
 export function clearMessageInput() {
   el('message-input').value = '';
+}
+
+export function focusUsername() {
+  el('username-input')?.focus();
+}
+
+export function focusMessageInput() {
+  el('message-input')?.focus();
 }

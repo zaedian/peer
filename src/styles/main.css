@@ -47,10 +47,29 @@ body {
   caret-color: transparent;
 }
 
-/* Keep chat usable on small screens */
+/* Keep chat usable on small screens + mobile browser chrome */
+#chat-screen {
+  height: calc(100vh - 140px);
+  height: calc(100dvh - 140px);
+}
 @media (max-width: 767px) {
   #chat-screen {
     height: auto;
     min-height: calc(100vh - 160px);
+    min-height: calc(100dvh - 160px);
+  }
+}
+
+/* Visible keyboard focus (a11y) */
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 1px;
+}
+
+/* Respect reduced-motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  #chat-messages > div {
+    animation: none;
   }
 }

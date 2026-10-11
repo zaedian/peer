@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Peer-to-peer end-to-end encrypted chat room with automatic host failover.">
     <title>P2P Chat Room (Admin Host)</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -19,8 +20,9 @@
             <h1 class="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">P2P Secure Chat</h1>
             <span id="role-badge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-600/20 text-cyan-300 border border-cyan-500/40">GUEST</span>
         </div>
-        <p id="connection-status" class="text-xs text-slate-400 mt-1">Disconnected</p>
+        <p id="connection-status" class="text-xs text-slate-400 mt-1" role="status">Disconnected</p>
         <p id="e2ee-status" class="text-[11px] text-slate-500">🔓 E2EE off</p>
+        <p id="room-lock-status" class="text-[11px] text-slate-500">🔓 Open room</p>
     </header>
 
     <!-- Main Container -->
@@ -31,8 +33,17 @@
             <h2 class="text-lg font-semibold text-center text-indigo-300">Join or Create Room</h2>
 
             <div>
-                <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Your Name</label>
-                <input id="username-input" type="text" placeholder="Enter your display name..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-indigo-500">
+                <label for="username-input" class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Your Name</label>
+                <input id="username-input" type="text" maxlength="40" autocomplete="nickname" placeholder="Enter your display name..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-indigo-500">
+            </div>
+
+            <div>
+                <label for="room-password-input" class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Room Password <span class="normal-case text-slate-500">(optional — host sets it, guests enter it)</span></label>
+                <input id="room-password-input" type="password" maxlength="128" autocomplete="off" placeholder="Leave empty for an open room..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-indigo-500">
+                <label class="mt-2 flex items-start gap-2 text-[11px] text-slate-400 cursor-pointer">
+                    <input id="include-pw-checkbox" type="checkbox" class="mt-0.5 accent-indigo-500">
+                    <span>Include password in invite link (off by default — anyone with the link can join)</span>
+                </label>
             </div>
 
             <p class="text-[11px] text-slate-500 leading-relaxed">🔒 Messages are end-to-end encrypted (AES-GCM-256). The key lives only in the invite link hash — never on a server.</p>
@@ -46,6 +57,7 @@
                     <div class="flex-grow border-t border-slate-800"></div>
                 </div>
 
+                <label for="room-code-input" class="sr-only">Room code</label>
                 <input id="room-code-input" type="text" placeholder="Paste Room Code..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-cyan-500 font-mono text-sm">
                 <button id="join-room-btn" class="w-full bg-cyan-600 hover:bg-cyan-500 font-medium py-3 rounded-lg transition shadow-lg shadow-cyan-600/30">Join Room</button>
             </div>
@@ -59,22 +71,24 @@
                 <div>
                     <span class="text-xs text-slate-400 uppercase tracking-wider">Room Code</span>
                     <div class="flex items-center gap-2 mt-1">
+                        <label for="display-room-code" class="sr-only">Room code</label>
                         <input id="display-room-code" type="text" readonly class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-cyan-300 select-all" />
-                        <button id="copy-code-btn" title="Copy room code" class="bg-slate-800 hover:bg-slate-700 p-1.5 rounded text-xs">📋</button>
                     </div>
+                    <button id="copy-code-btn" title="Copy room code" aria-label="Copy room code" class="mt-1.5 w-full bg-slate-800 hover:bg-slate-700 py-1.5 rounded-lg text-xs font-medium transition">📋 Copy code</button>
                 </div>
 
                 <div>
                     <span class="text-xs text-slate-400 uppercase tracking-wider">Invite Link (code + key)</span>
                     <div class="flex items-center gap-2 mt-1">
+                        <label for="display-invite-link" class="sr-only">Invite link</label>
                         <input id="display-invite-link" type="text" readonly placeholder="Available after joining..." class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-emerald-300 select-all" />
-                        <button id="copy-invite-btn" title="Copy invite link" class="bg-slate-800 hover:bg-slate-700 p-1.5 rounded text-xs">🔗</button>
                     </div>
+                    <button id="copy-invite-btn" title="Copy invite link" aria-label="Copy invite link" class="mt-1.5 w-full bg-slate-800 hover:bg-slate-700 py-1.5 rounded-lg text-xs font-medium transition">🔗 Copy link</button>
                 </div>
 
                 <div class="flex-1 flex flex-col min-h-[120px]">
-                    <span class="text-xs text-slate-400 uppercase tracking-wider mb-2">Connected Users (<span id="user-count">1</span>)</span>
-                    <ul id="peer-list" class="flex-1 overflow-y-auto space-y-1 bg-slate-950/50 border border-slate-800/60 rounded-xl p-2 text-sm">
+                    <span id="peer-list-label" class="text-xs text-slate-400 uppercase tracking-wider mb-2">Connected Users (<span id="user-count">1</span>)</span>
+                    <ul id="peer-list" role="list" aria-labelledby="peer-list-label" class="flex-1 overflow-y-auto space-y-1 bg-slate-950/50 border border-slate-800/60 rounded-xl p-2 text-sm">
                         <!-- User items injected here -->
                     </ul>
                 </div>
@@ -84,12 +98,14 @@
 
             <!-- Chat Panel -->
             <div class="flex-1 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col overflow-hidden">
-                <div id="chat-messages" class="flex-1 p-4 overflow-y-auto space-y-3 flex flex-col">
+                <div id="chat-messages" role="log" aria-live="polite" aria-label="Chat messages" class="flex-1 p-4 overflow-y-auto space-y-3 flex flex-col">
                     <!-- Chat bubbles injected here -->
                 </div>
+                <div id="typing-indicator" aria-live="polite" class="px-4 py-1 text-[11px] text-slate-400 italic min-h-[1.25rem]"></div>
 
                 <form id="chat-form" class="p-3 bg-slate-950 border-t border-slate-800 flex gap-2">
-                    <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
+                    <label for="message-input" class="sr-only">Type a message</label>
+                    <input id="message-input" type="text" maxlength="2000" placeholder="Type a message..." autocomplete="off" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
                     <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 px-5 rounded-xl font-medium text-sm transition">Send</button>
                 </form>
             </div>
@@ -97,6 +113,10 @@
         </div>
 
     </main>
+
+    <noscript>
+        <p style="text-align:center;padding:1rem">This chat app requires JavaScript (WebRTC + Web Crypto).</p>
+    </noscript>
 
     <!-- App entry point (ES modules) -->
     <script type="module" src="../src/js/app.js"></script>
