@@ -426,11 +426,13 @@ export class PeerManager {
 
   /* ================= nudge + call signalling ================= */
 
-  /** Room-wide attention buzz (relayed to every peer). */
+  /** Room-wide attention buzz (relayed to every peer). Returns false if nobody is connected. */
   sendNudge() {
     const username = this.isHost ? `${this.myUsername} (Host)` : this.myUsername;
-    if (!username) return;
+    if (!username) return false;
+    if (!Object.keys(this.connections).length) return false;
     this._sendRawToAll({ type: 'nudge', from: this.myId, username });
+    return true;
   }
 
   /**
@@ -443,18 +445,19 @@ export class PeerManager {
       from: this.myId,
       username: this.isHost ? `${this.myUsername} (Host)` : this.myUsername,
     };
-    if (!msg.to) return;
+    if (!msg.to) return false;
     if (this.isHost) {
       const c = this.connections[msg.to]?.conn;
       if (c && c.open) {
-        try { c.send(msg); } catch (_) {}
+        try { c.send(msg); return true; } catch (_) { return false; }
       }
-    } else {
-      const h = this.connections[this.hostId]?.conn;
-      if (h && h.open) {
-        try { h.send(msg); } catch (_) {}
-      }
+      return false;
     }
+    const h = this.connections[this.hostId]?.conn;
+    if (h && h.open) {
+      try { h.send(msg); return true; } catch (_) { return false; }
+    }
+    return false;
   }
 
   _relayCallSignal(data) {

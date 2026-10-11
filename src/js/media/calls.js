@@ -15,17 +15,13 @@ export class CallManager {
   constructor(deps) {
     this.deps = deps;
     this.active = null; // { call, stream, withId, video }
-    this.pending = null; // { call, fromId, video } — incoming, unanswered
+    this._heldStream = null; // captured on Accept, used when the dial lands
     this.muted = false;
     this.cameraOff = false;
   }
 
   get inCall() {
     return !!this.active;
-  }
-
-  get hasPending() {
-    return !!this.pending;
   }
 
   async _mic(video) {
@@ -55,16 +51,6 @@ export class CallManager {
     this._wire(call);
     this.deps.onLocalStream?.(stream);
     return call;
-  }
-
-  /** Stage an incoming MediaConnection for accept/decline. */
-  stageIncoming(call, fromId, video) {
-    if (this.active || this.pending) {
-      try { call.close(); } catch (_) {}
-      return false; // busy
-    }
-    this.pending = { call, fromId, video: !!video };
-    return true;
   }
 
   /** Callee side: capture mic/cam on Accept (user gesture), hold for dial. */
@@ -104,15 +90,9 @@ export class CallManager {
     return true;
   }
 
-  declinePending() {
-    if (!this.pending) return;
-    try { this.pending.call.close(); } catch (_) {}
-    this.pending = null;
-  }
-
   hangup() {
-    if (this.pending) this.declinePending();
     if (!this.active) {
+      this.discardHeld();
       this.deps.onEnded?.();
       return;
     }
@@ -134,7 +114,6 @@ export class CallManager {
     }
     this.discardHeld();
     this.active = null;
-    this.pending = null;
     this.deps.onEnded?.();
   }
 

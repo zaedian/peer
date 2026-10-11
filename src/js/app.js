@@ -210,8 +210,11 @@ function busy() {
 
 function onNudgePressed() {
   if (!manager) return;
-  manager.sendNudge();
-  ui.appendSystemMessage('You nudged the room 🔔');
+  if (manager.sendNudge()) {
+    ui.appendSystemMessage('You nudged the room 🔔');
+  } else {
+    ui.appendSystemMessage('Nobody to nudge yet.');
+  }
 }
 
 async function startOutgoing(targetId, video) {
@@ -231,7 +234,13 @@ async function startOutgoing(targetId, video) {
       ui.appendSystemMessage(`${name} didn't answer.`);
     }, CALL_TIMEOUT_MS),
   };
-  manager.sendCallSignal({ type: 'call-invite', to: targetId, video });
+  if (!manager.sendCallSignal({ type: 'call-invite', to: targetId, video })) {
+    clearTimeout(outgoing.timer);
+    outgoing = null;
+    ui.hideCallOverlay();
+    ui.appendSystemMessage('Not connected — call not sent.');
+    return;
+  }
   ui.showCallOverlay(name, video);
   ui.setCallStatus('Calling…');
 }
@@ -240,8 +249,15 @@ function handleCallSignal(msg) {
   if (!msg || !msg.type) return;
   const cm = ensureCalls();
   if (msg.type === 'call-invite') {
-    if (!msg.from || busy()) {
-      if (msg.from) manager?.sendCallSignal({ type: 'call-decline', to: msg.from });
+    if (!msg.from) return;
+    // Simultaneous dial: we already called them — keep our outgoing leg,
+    // decline theirs so exactly one call survives.
+    if (outgoing && outgoing.to === msg.from) {
+      manager?.sendCallSignal({ type: 'call-decline', to: msg.from });
+      return;
+    }
+    if (busy()) {
+      manager?.sendCallSignal({ type: 'call-decline', to: msg.from });
       return;
     }
     incomingInvite = {
@@ -305,7 +321,10 @@ function handleIncomingMedia(call) {
       return;
     }
   }
+  // Unsolicited or busy: close the media and tell the caller right away
+  // (instead of leaving them on "Calling…" until timeout).
   try { call?.close(); } catch (_) {}
+  if (from) manager?.sendCallSignal({ type: 'call-decline', to: from });
 }
 
 async function onAcceptCall() {
