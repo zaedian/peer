@@ -19,6 +19,9 @@ const HISTORY_CAP = 200;
 const LOBBY_STASH_KEY = 'p2pchat-lobby';
 const USERNAME_KEY = 'p2pchat-username';
 const AUTOJOIN_KEY = 'p2pchat-autojoin';
+// True while an automatic (link + remembered name) join is in flight, so a
+// rejection can settle back to the lobby instead of alert + reload.
+let autoJoinInFlight = false;
 
 function rememberedName() {
   try {
@@ -91,10 +94,19 @@ async function copyText(text, okMsg) {
 }
 
 // Chat stays clean: only people + calls + files reach the message list.
-// Connection/debug noise goes to the console + header status instead.
+// Actionable send failures toast (a "sent" bubble must never lie silently);
+// other connection/debug noise goes to the console + header status instead.
 function showServerNote(text) {
   const t = String(text || '');
   if (!t) return;
+  if (/not connected to host — message not sent|encryption not ready|encryption failed/i.test(t)) {
+    ui.showToast(t);
+    return;
+  }
+  if (/no encryption key in link/i.test(t)) {
+    ui.showToast('No key in your link — ask the host for the full invite link.');
+    return;
+  }
   if (
     /joined the room\.|left the room\.|nudged the room|is now hosting|New host took over|Kicked |kicked by the host|timed out and was removed/i.test(t)
   ) {
@@ -123,6 +135,22 @@ function makeManager() {
     onTyping: (username) => showTyping(username),
     onLockChanged: (locked) => ui.setLockStatus(!!locked),
     onDenied: (reason) => {
+      // Never auto-rejoin after a rejection (stops kick/deny reload loops).
+      try { sessionStorage.setItem(AUTOJOIN_KEY, '1'); } catch (_) {}
+      if (autoJoinInFlight) {
+        autoJoinInFlight = false;
+        try { manager?.leaveRoom(); } catch (_) {}
+        manager = null;
+        ui.showSetupScreen();
+        ui.setStatus('Join blocked — check the password and try again.', 'text-amber-400');
+        ui.showToast(reason === 'wrong-password' ? 'Wrong room password.' : 'Join rejected by host.');
+        const joinBtn = document.getElementById('join-room-btn');
+        if (joinBtn) {
+          joinBtn.disabled = false;
+          joinBtn.innerText = ui.isInviteMode() ? 'Accept Invite ✓' : 'Join →';
+        }
+        return;
+      }
       alert(reason === 'wrong-password' ? 'Wrong room password.' : 'Join rejected by host.');
       location.reload();
     },
@@ -170,6 +198,9 @@ function makeManager() {
       ui.focusMessageInput();
     },
     onKicked: () => {
+      // Suppress auto-join for this tab session so a kick can't loop
+      // straight back into the room after the reload.
+      try { sessionStorage.setItem(AUTOJOIN_KEY, '1'); } catch (_) {}
       alert('You have been kicked by the host.');
       location.reload();
     },
@@ -506,7 +537,7 @@ async function handleCallSignal(msg) {  if (!msg || !msg.type) return;
       return;
     }
     if (busy()) {
-      manager?.sendCallSignal({ type: 'call-decline', to: msg.from });
+      manager?.sendCallSignal({ type: 'call-decline', to: msg.from, reason: 'busy' });
       return;
     }
     incomingInvite = {
@@ -580,11 +611,16 @@ async function handleCallSignal(msg) {  if (!msg || !msg.type) return;
   } else if (msg.type === 'call-upgrade-decline') {
     handleUpgradeDecline(msg);
   } else if (msg.type === 'call-decline' || msg.type === 'call-end') {    if (outgoing && msg.from === outgoing.to) {
+      const declinedName = outgoing.name;
       clearTimeout(outgoing.timer);
       outgoing = null;
       ui.hideCallOverlay();
       ui.setCallBusy(false);
-      ui.appendSystemMessage(msg.type === 'call-decline' ? 'Call declined.' : 'Call ended.');
+      if (msg.type === 'call-decline' && msg.reason === 'busy') {
+        ui.appendSystemMessage(`${declinedName} is busy.`);
+      } else {
+        ui.appendSystemMessage(msg.type === 'call-decline' ? 'Call declined.' : 'Call ended.');
+      }
     } else if (incomingInvite && msg.from === incomingInvite.from) {
       clearTimeout(incomingInvite.timer);
       incomingInvite = null;
@@ -625,11 +661,20 @@ function handleIncomingMedia(call) {
   const from = call?.peer;
   // Expected only as the callee's leg after we accepted.
   if (activePeer && from === activePeer.id && !cm.inCall) {
-    if (cm.adoptIncoming(call, from, activePeer.video)) {
+    // Trust the dial's own metadata over our optimistic flag: after an
+    // accepted video upgrade the caller may fall back to a voice dial,
+    // and the tile must match the stream that actually arrives.
+    const meta = call && call.metadata;
+    const arrivedVideo = meta && typeof meta.video === 'boolean' ? meta.video : activePeer.video;
+    if (cm.adoptIncoming(call, from, arrivedVideo)) {
       upgradingToVideo = '';
-      setCallBase(activePeer.video ? 'In call' : 'In call 🎙️');
-      ui.setCallBusy(true, activePeer.id, !activePeer.video);
-      if (activePeer.video) ui.appendSystemMessage('Switched to video 🎥');
+      if (activePeer.video !== arrivedVideo) {
+        activePeer.video = arrivedVideo;
+        ui.showCallOverlay(activePeer.name, arrivedVideo);
+      }
+      setCallBase(arrivedVideo ? 'In call' : 'In call 🎙️');
+      ui.setCallBusy(true, activePeer.id, !arrivedVideo);
+      if (arrivedVideo) ui.appendSystemMessage('Switched to video 🎥');
       return;
     }
   }
@@ -733,6 +778,10 @@ function endActiveCall() {
 const FILE_CHUNK = 64 * 1024; // 64 KB per DataConnection message
 const FILE_MAX = 50 * 1024 * 1024; // 50 MB cap
 const FILE_OFFER_MS = 120000;
+/** No chunk for this long after accept → declare the transfer stalled. */
+const FILE_STALL_MS = 60000;
+/** No end-to-end receipt this long after the last chunk → unconfirmed. */
+const FILE_RECEIPT_MS = 30000;
 let fileSeq = 0;
 const outgoingFiles = new Map(); // fileId -> { file, to, total }
 const incomingOffers = new Map(); // fileId -> { from, username, name, size, mime, timer }
@@ -788,9 +837,10 @@ async function onFileChosen(file) {
     return;
   }
   const peers = otherPeers();
-  const target = peers.find((p) => p.id === pendingFilePeer) || peers[0];
+  const target = peers.find((p) => p.id === pendingFilePeer);
   if (!target) {
-    ui.showToast('Nobody to send to yet.');
+    pendingFilePeer = '';
+    ui.showToast(peers.length ? 'They left — pick someone again.' : 'Nobody to send to yet.');
     return;
   }
   const fileId = `${manager.myId || 'me'}-${Date.now()}-${fileSeq++}`.replace(/[^a-zA-Z0-9-]/g, '');
@@ -840,6 +890,7 @@ function handleFileSignal(msg) {
   } else if (msg.type === 'file-decline') {
     if (!msg.from || !msg.fileId) return;
     if (outgoingFiles.has(msg.fileId)) {
+      try { clearTimeout(outgoingFiles.get(msg.fileId).receiptTimer); } catch (_) {}
       outgoingFiles.delete(msg.fileId);
       ui.failFileCard(msg.fileId, 'They declined the file.');
       ui.showToast('File declined.');
@@ -852,20 +903,38 @@ function handleFileSignal(msg) {
       t.chunks[msg.seq] = msg.buf;
       t.received++;
       ui.setFileProgress(msg.fileId, (t.received / t.total) * 100, `Receiving… ${Math.round((t.received / t.total) * 100)}%`);
+      armStallTimer(msg.fileId);
     }
   } else if (msg.type === 'file-done') {
     const t = incomingFiles.get(msg.fileId);
     if (!t) return;
+    if (t.timer) clearTimeout(t.timer);
     try {
       const blob = new Blob(t.chunks, { type: t.mime || 'application/octet-stream' });
       const url = URL.createObjectURL(blob);
       ui.completeFileCard({ fileId: msg.fileId, url, name: t.name, size: t.size, mime: t.mime, sender: t.username, isSelf: false });
       ui.showToast(`📁 ${t.name} received`);
       if (lastRoomCode) queueHistorySave(lastRoomCode, { s: t.username, t: `📁 sent a file: ${t.name}`, self: false, time: ui.formatTime() });
+      // End-to-end receipt so the sender never shows a false 100%.
+      manager?.sendFileSignal({ type: 'file-received', to: t.from, fileId: msg.fileId });
     } catch (_) {
       ui.failFileCard(msg.fileId, 'Could not assemble file.');
     }
     incomingFiles.delete(msg.fileId);
+  } else if (msg.type === 'file-received') {
+    if (!msg.from || !msg.fileId) return;
+    const out = outgoingFiles.get(msg.fileId);
+    if (!out || out.to !== msg.from) return;
+    if (out.receiptTimer) clearTimeout(out.receiptTimer);
+    outgoingFiles.delete(msg.fileId);
+    try {
+      const url = URL.createObjectURL(out.file);
+      ui.completeFileCard({ fileId: msg.fileId, url, name: out.file.name, size: out.file.size, mime: out.file.type, sender: 'You', isSelf: true });
+      ui.showToast(`📁 ${out.file.name} delivered ✓`);
+      if (lastRoomCode) queueHistorySave(lastRoomCode, { s: 'You', t: `📁 sent a file: ${out.file.name}`, self: true, time: ui.formatTime() });
+    } catch (_) {
+      ui.failFileCard(msg.fileId, 'Could not finish file.');
+    }
   } else if (msg.type === 'file-cancel') {
     if (incomingOffers.has(msg.fileId)) {
       clearTimeout(incomingOffers.get(msg.fileId).timer);
@@ -873,10 +942,12 @@ function handleFileSignal(msg) {
       ui.failFileCard(msg.fileId, 'They cancelled the file.');
     }
     if (incomingFiles.has(msg.fileId)) {
+      try { clearTimeout(incomingFiles.get(msg.fileId).timer); } catch (_) {}
       incomingFiles.delete(msg.fileId);
       ui.failFileCard(msg.fileId, 'Transfer cancelled.');
     }
     if (outgoingFiles.has(msg.fileId)) {
+      try { clearTimeout(outgoingFiles.get(msg.fileId).receiptTimer); } catch (_) {}
       outgoingFiles.delete(msg.fileId);
       ui.failFileCard(msg.fileId, 'Transfer cancelled.');
     }
@@ -909,12 +980,25 @@ async function sendFileChunks(fileId) {
   }
   if (!outgoingFiles.has(fileId)) return;
   manager.sendFileSignal({ type: 'file-done', to, fileId });
-  try {
-    const url = URL.createObjectURL(file);
-    ui.completeFileCard({ fileId, url, name: file.name, size: file.size, mime: file.type, sender: 'You', isSelf: true });
-    if (lastRoomCode) queueHistorySave(lastRoomCode, { s: 'You', t: `📁 sent a file: ${file.name}`, self: true, time: ui.formatTime() });
-  } catch (_) {}
-  outgoingFiles.delete(fileId);
+  // Completion waits for the receiver's end-to-end receipt — a relayed
+  // send succeeding is NOT proof of delivery.
+  ui.setFileProgress(fileId, 100, 'Waiting for confirmation…');
+  out.receiptTimer = setTimeout(() => {
+    if (!outgoingFiles.has(fileId)) return;
+    outgoingFiles.delete(fileId);
+    ui.failFileCard(fileId, 'Delivery not confirmed — they may have left.');
+  }, FILE_RECEIPT_MS);
+}
+
+function armStallTimer(fileId) {
+  const t = incomingFiles.get(fileId);
+  if (!t) return;
+  if (t.timer) clearTimeout(t.timer);
+  t.timer = setTimeout(() => {
+    if (!incomingFiles.has(fileId)) return;
+    incomingFiles.delete(fileId);
+    ui.failFileCard(fileId, 'Transfer stalled — sender may have left.');
+  }, FILE_STALL_MS);
 }
 
 function acceptFile(fileId) {
@@ -923,9 +1007,10 @@ function acceptFile(fileId) {
   clearTimeout(offer.timer);
   incomingOffers.delete(fileId);
   const total = Math.max(1, Math.ceil((offer.size || 1) / FILE_CHUNK));
-  incomingFiles.set(fileId, { ...offer, chunks: new Array(total), received: 0, total });
+  incomingFiles.set(fileId, { ...offer, chunks: new Array(total), received: 0, total, timer: null });
   ui.resolveFileOffer(fileId, true);
   ui.setFileProgress(fileId, 0, 'Receiving… 0%');
+  armStallTimer(fileId);
   manager.sendFileSignal({ type: 'file-accept', to: offer.from, fileId });
 }
 
@@ -1015,11 +1100,40 @@ function onCopyInvite() {
   const input = document.getElementById('display-invite-link');
   if (!input || !input.value) { alert('Join a room first.'); return; }
   copyText(input.value, 'Invite link (room + encryption key) copied!');
+  // A promoted host never learned the plaintext password — and anyone can
+  // untick the checkbox — so warn instead of sharing a dead link silently.
+  if (manager?.roomLocked && !(manager.isHost && hostPassword && ui.getIncludePwChecked())) {
+    setTimeout(() => ui.showToast('Room is locked — share the password separately.'), 2700);
+  }
+}
+
+/** Tell every live transfer peer we're gone so cards don't stall forever. */
+function cancelAllTransfers() {
+  for (const [fileId, out] of outgoingFiles) {
+    try { manager?.sendFileSignal({ type: 'file-cancel', to: out.to, fileId }); } catch (_) {}
+    try { clearTimeout(out.receiptTimer); } catch (_) {}
+    ui.failFileCard(fileId, 'Transfer cancelled (you left).');
+  }
+  outgoingFiles.clear();
+  for (const [fileId, inc] of incomingFiles) {
+    try { manager?.sendFileSignal({ type: 'file-cancel', to: inc.from, fileId }); } catch (_) {}
+    try { clearTimeout(inc.timer); } catch (_) {}
+    ui.failFileCard(fileId, 'Transfer cancelled.');
+  }
+  incomingFiles.clear();
+  for (const [fileId, off] of incomingOffers) {
+    try { clearTimeout(off.timer); } catch (_) {}
+    try { manager?.sendFileSignal({ type: 'file-decline', to: off.from, fileId }); } catch (_) {}
+    ui.resolveFileOffer(fileId, false);
+  }
+  incomingOffers.clear();
 }
 
 function onLeaveRoom() {
   if (!confirm('Are you sure you want to leave the room?')) return;
+  autoJoinInFlight = false;
   try { endActiveCall(); } catch (_) {}
+  try { cancelAllTransfers(); } catch (_) {}
   try { manager?.leaveRoom(); } catch (_) {}
   location.reload();
 }
@@ -1229,10 +1343,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     ui.setStatus(`Joining as ${ui.getUsernameInput()}...`, 'text-amber-400');
     setTimeout(() => {
+      autoJoinInFlight = true;
       onJoinRoom({ auto: true }).then((ok) => {
-        if (!ok && joinBtn) {
-          joinBtn.disabled = false;
-          joinBtn.innerText = ui.isInviteMode() ? 'Accept Invite ✓' : 'Join →';
+        if (!ok) {
+          autoJoinInFlight = false;
+          if (joinBtn) {
+            joinBtn.disabled = false;
+            joinBtn.innerText = ui.isInviteMode() ? 'Accept Invite ✓' : 'Join →';
+          }
         }
       });
     }, 350);
@@ -1244,6 +1362,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   window.addEventListener('beforeunload', () => {
     try { endActiveCall(); } catch (_) {}
+    try { cancelAllTransfers(); } catch (_) {}
     try { manager?.leaveRoom(); } catch (_) {}
   });
 });

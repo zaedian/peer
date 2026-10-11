@@ -330,6 +330,8 @@ export class PeerManager {
     this.peer.on('error', (err) => {
       // The room id may be briefly unclaimed while a new host takes over
       // after the original host left — redial a few times before giving up.
+      // Redials go back to the room alias (not a possibly-dead personal id)
+      // so chained migrations still converge on whoever is live.
       if (err?.type === 'peer-unavailable' && !this.isHost && this._joinTries < 3) {
         const hostConn = this.connections[this.hostId]?.conn;
         if (!hostConn || !hostConn.open) {
@@ -337,7 +339,7 @@ export class PeerManager {
           this.status(`Host is switching over — retrying... (${this._joinTries}/3)`, 'text-amber-400');
           setTimeout(() => {
             if (!this.isHost && (!this.connections[this.hostId] || !this.connections[this.hostId].conn?.open)) {
-              try { this._dialAsClient(this.hostId); } catch (_) {}
+              try { this._dialAsClient(this.roomId || this.hostId); } catch (_) {}
             }
           }, 2500);
           return;
@@ -689,6 +691,7 @@ export class PeerManager {
       this.roomPeersList = data.users || [];
       this.mesh?.recordActivity(this.hostId);
       this.mesh?.updateRoster(this.roster);
+      this._redirectHops = 0; // joined cleanly — redirect budget restored
       this.cbs.onClientPeerList?.(this.roomPeersList, this.roomLocked, this.myId);
     } else if (data.type === 'welcome') {
       // Host greeting: join using the room's true salt (post-migration safe).
@@ -712,7 +715,7 @@ export class PeerManager {
       // at the live host. Follow it (capped) instead of joining the alias.
       const target = typeof data.hostId === 'string' ? data.hostId : '';
       if (!target || target === this.myId || this.isHost) return;
-      if (this._redirectHops >= 2 || target === this.hostId) return;
+      if (this._redirectHops >= 4 || target === this.hostId) return;
       this._redirectHops += 1;
       if (this._joinTimer) clearTimeout(this._joinTimer);
       const oldHost = this.hostId;
