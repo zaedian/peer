@@ -3,18 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Peer-to-peer end-to-end encrypted chat room with automatic host failover.">
     <title>P2P Chat Room (Admin Host)</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- PeerJS CDN -->
+    <!-- App styles -->
+    <link rel="stylesheet" href="./src/styles/main.css">
+    <!-- PeerJS CDN (UMD global `Peer`, consumed by the ES modules below) -->
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col font-sans">
 
     <!-- Header -->
     <header class="bg-slate-900 border-b border-slate-800 p-4 text-center shadow-md">
-        <h1 class="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">P2P Secure Chat</h1>
-        <p id="connection-status" class="text-xs text-slate-400 mt-1">Disconnected</p>
+        <div class="flex items-center justify-center gap-2">
+            <h1 class="text-xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">P2P Secure Chat</h1>
+            <span id="role-badge" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-600/20 text-cyan-300 border border-cyan-500/40">GUEST</span>
+        </div>
+        <p id="connection-status" class="text-xs text-slate-400 mt-1" role="status">Disconnected</p>
+        <p id="e2ee-status" class="text-[11px] text-slate-500">🔓 E2EE off</p>
+        <p id="room-lock-status" class="text-[11px] text-slate-500">🔓 Open room</p>
     </header>
 
     <!-- Main Container -->
@@ -23,57 +31,81 @@
         <!-- SETUP / LOBBY SCREEN -->
         <div id="setup-screen" class="my-auto bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl max-w-md w-full mx-auto space-y-4">
             <h2 class="text-lg font-semibold text-center text-indigo-300">Join or Create Room</h2>
-            
+
             <div>
-                <label class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Your Name</label>
-                <input id="username-input" type="text" placeholder="Enter your display name..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-indigo-500">
+                <label for="username-input" class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Your Name</label>
+                <input id="username-input" type="text" maxlength="40" autocomplete="nickname" placeholder="Enter your display name..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-indigo-500">
             </div>
 
+            <div>
+                <label for="room-password-input" class="block text-xs uppercase tracking-wider text-slate-400 mb-1">Room Password <span class="normal-case text-slate-500">(optional — host sets it, guests enter it)</span></label>
+                <input id="room-password-input" type="password" maxlength="128" autocomplete="off" placeholder="Leave empty for an open room..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-indigo-500">
+                <label class="mt-2 flex items-start gap-2 text-[11px] text-slate-400 cursor-pointer">
+                    <input id="include-pw-checkbox" type="checkbox" class="mt-0.5 accent-indigo-500">
+                    <span>Include password in invite link (off by default — anyone with the link can join)</span>
+                </label>
+            </div>
+
+            <p class="text-[11px] text-slate-500 leading-relaxed">🔒 Messages are end-to-end encrypted (AES-GCM-256). The key lives only in the invite link hash — never on a server.</p>
+
             <div class="pt-2 flex flex-col gap-3">
-                <button onclick="createRoom()" class="w-full bg-indigo-600 hover:bg-indigo-500 font-medium py-3 rounded-lg transition shadow-lg shadow-indigo-600/30">Create Room (Host)</button>
-                
+                <button id="create-room-btn" class="w-full bg-indigo-600 hover:bg-indigo-500 font-medium py-3 rounded-lg transition shadow-lg shadow-indigo-600/30">Create Room (Host)</button>
+
                 <div class="relative flex py-2 items-center">
                     <div class="flex-grow border-t border-slate-800"></div>
                     <span class="flex-shrink mx-4 text-xs text-slate-500 uppercase">Or join existing</span>
                     <div class="flex-grow border-t border-slate-800"></div>
                 </div>
 
+                <label for="room-code-input" class="sr-only">Room code</label>
                 <input id="room-code-input" type="text" placeholder="Paste Room Code..." class="w-full bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-100 focus:outline-none focus:border-cyan-500 font-mono text-sm">
-                <button onclick="joinRoom()" class="w-full bg-cyan-600 hover:bg-cyan-500 font-medium py-3 rounded-lg transition shadow-lg shadow-cyan-600/30">Join Room</button>
+                <button id="join-room-btn" class="w-full bg-cyan-600 hover:bg-cyan-500 font-medium py-3 rounded-lg transition shadow-lg shadow-cyan-600/30">Join Room</button>
             </div>
         </div>
 
         <!-- CHAT ROOM SCREEN (Hidden by default) -->
         <div id="chat-screen" class="hidden flex-1 flex flex-col md:flex-row gap-4 h-[calc(100vh-140px)]">
-            
+
             <!-- Sidebar: Room Info & Peers -->
             <div class="w-full md:w-64 bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3 shrink-0">
                 <div>
                     <span class="text-xs text-slate-400 uppercase tracking-wider">Room Code</span>
                     <div class="flex items-center gap-2 mt-1">
+                        <label for="display-room-code" class="sr-only">Room code</label>
                         <input id="display-room-code" type="text" readonly class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-cyan-300 select-all" />
-                        <button onclick="copyRoomCode()" class="bg-slate-800 hover:bg-slate-700 p-1.5 rounded text-xs">📋</button>
                     </div>
+                    <button id="copy-code-btn" title="Copy room code" aria-label="Copy room code" class="mt-1.5 w-full bg-slate-800 hover:bg-slate-700 py-1.5 rounded-lg text-xs font-medium transition">📋 Copy code</button>
+                </div>
+
+                <div>
+                    <span class="text-xs text-slate-400 uppercase tracking-wider">Invite Link (code + key)</span>
+                    <div class="flex items-center gap-2 mt-1">
+                        <label for="display-invite-link" class="sr-only">Invite link</label>
+                        <input id="display-invite-link" type="text" readonly placeholder="Available after joining..." class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-emerald-300 select-all" />
+                    </div>
+                    <button id="copy-invite-btn" title="Copy invite link" aria-label="Copy invite link" class="mt-1.5 w-full bg-slate-800 hover:bg-slate-700 py-1.5 rounded-lg text-xs font-medium transition">🔗 Copy link</button>
                 </div>
 
                 <div class="flex-1 flex flex-col min-h-[120px]">
-                    <span class="text-xs text-slate-400 uppercase tracking-wider mb-2">Connected Users (<span id="user-count">1</span>)</span>
-                    <ul id="peer-list" class="flex-1 overflow-y-auto space-y-1 bg-slate-950/50 border border-slate-800/60 rounded-xl p-2 text-sm">
+                    <span id="peer-list-label" class="text-xs text-slate-400 uppercase tracking-wider mb-2">Connected Users (<span id="user-count">1</span>)</span>
+                    <ul id="peer-list" role="list" aria-labelledby="peer-list-label" class="flex-1 overflow-y-auto space-y-1 bg-slate-950/50 border border-slate-800/60 rounded-xl p-2 text-sm">
                         <!-- User items injected here -->
                     </ul>
                 </div>
 
-                <button onclick="leaveRoom()" class="w-full bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/40 py-2 rounded-xl text-xs font-medium transition">Leave Room</button>
+                <button id="leave-room-btn" class="w-full bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/40 py-2 rounded-xl text-xs font-medium transition">Leave Room</button>
             </div>
 
             <!-- Chat Panel -->
             <div class="flex-1 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col overflow-hidden">
-                <div id="chat-messages" class="flex-1 p-4 overflow-y-auto space-y-3 flex flex-col">
+                <div id="chat-messages" role="log" aria-live="polite" aria-label="Chat messages" class="flex-1 p-4 overflow-y-auto space-y-3 flex flex-col">
                     <!-- Chat bubbles injected here -->
                 </div>
+                <div id="typing-indicator" aria-live="polite" class="px-4 py-1 text-[11px] text-slate-400 italic min-h-[1.25rem]"></div>
 
-                <form id="chat-form" onsubmit="sendMessage(event)" class="p-3 bg-slate-950 border-t border-slate-800 flex gap-2">
-                    <input id="message-input" type="text" placeholder="Type a message..." autocomplete="off" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
+                <form id="chat-form" class="p-3 bg-slate-950 border-t border-slate-800 flex gap-2">
+                    <label for="message-input" class="sr-only">Type a message</label>
+                    <input id="message-input" type="text" maxlength="2000" placeholder="Type a message..." autocomplete="off" class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-indigo-500">
                     <button type="submit" class="bg-indigo-600 hover:bg-indigo-500 px-5 rounded-xl font-medium text-sm transition">Send</button>
                 </form>
             </div>
@@ -82,272 +114,11 @@
 
     </main>
 
-    <!-- App Logic -->
-    <script>
-        let peer = null;
-        let conn = null; // Client connection to host
-        let connections = {}; // Host dictionary of active client connections { peerId: { conn, username } }
-        let myId = '';
-        let myUsername = '';
-        let isHost = false;
-        let roomPeersList = []; // Used by clients to render user list received from host
+    <noscript>
+        <p style="text-align:center;padding:1rem">This chat app requires JavaScript (WebRTC + Web Crypto).</p>
+    </noscript>
 
-        function setStatus(text, color = 'text-slate-400') {
-            const el = document.getElementById('connection-status');
-            el.className = `text-xs mt-1 ${color}`;
-            el.innerText = text;
-        }
-
-        // --- CREATE ROOM (HOST) ---
-        function createRoom() {
-            myUsername = document.getElementById('username-input').value.trim();
-            if (!myUsername) { alert('Please enter your name first.'); return; }
-
-            isHost = true;
-            setStatus('Creating P2P Room...', 'text-amber-400');
-
-            // Initialize Peer with auto-generated ID (serves as Room Code)
-            peer = new Peer();
-
-            peer.on('open', (id) => {
-                myId = id;
-                document.getElementById('display-room-code').value = id;
-                document.getElementById('setup-screen').classList.add('hidden');
-                document.getElementById('chat-screen').classList.remove('hidden');
-                setStatus('Room Active (Hosting)', 'text-emerald-400');
-                
-                // Host adds themselves to peer list
-                connections['self'] = { username: myUsername + ' (Host)', isHost: true };
-                updatePeerListUI();
-                appendSystemMessage('Room created successfully. Share your Room Code!');
-            });
-
-            peer.on('connection', (incomingConn) => {
-                incomingConn.on('data', (data) => handleHostData(incomingConn, data));
-                incomingConn.on('close', () => {
-                    if (connections[incomingConn.peer]) {
-                        appendSystemMessage(`${connections[incomingConn.peer].username} left the room.`);
-                        delete connections[incomingConn.peer];
-                        broadcastUserList();
-                        updatePeerListUI();
-                    }
-                });
-            });
-
-            peer.on('error', (err) => {
-                alert('Peer error: ' + err.type);
-                setStatus('Error: ' + err.type, 'text-red-400');
-            });
-        }
-
-        // --- JOIN ROOM (CLIENT) ---
-        function joinRoom() {
-            myUsername = document.getElementById('username-input').value.trim();
-            const roomCode = document.getElementById('room-code-input').value.trim();
-
-            if (!myUsername) { alert('Please enter your name first.'); return; }
-            if (!roomCode) { alert('Please enter a valid Room Code.'); return; }
-
-            isHost = false;
-            setStatus('Connecting to Host...', 'text-amber-400');
-
-            peer = new Peer();
-
-            peer.on('open', (id) => {
-                myId = id;
-                // Connect to Host
-                conn = peer.connect(roomCode);
-
-                conn.on('open', () => {
-                    document.getElementById('display-room-code').value = roomCode;
-                    document.getElementById('setup-screen').classList.add('hidden');
-                    document.getElementById('chat-screen').classList.remove('hidden');
-                    setStatus('Connected to Room', 'text-emerald-400');
-                    
-                    // Send join packet with username
-                    conn.send({ type: 'join', username: myUsername });
-                    appendSystemMessage('Connected to the room!');
-                });
-
-                conn.on('data', (data) => handleClientData(data));
-
-                conn.on('close', () => {
-                    alert('Disconnected from room (Host closed or kicked you).');
-                    location.reload();
-                });
-            });
-
-            peer.on('error', (err) => {
-                alert('Connection failed: Could not find room.');
-                setStatus('Connection Failed', 'text-red-400');
-            });
-        }
-
-        // --- HOST DATA HANDLER ---
-        function handleHostData(incomingConn, data) {
-            if (data.type === 'join') {
-                connections[incomingConn.peer] = {
-                    conn: incomingConn,
-                    username: data.username,
-                    isHost: false
-                };
-                appendSystemMessage(`${data.username} joined the room.`);
-                broadcastUserList();
-                updatePeerListUI();
-            } 
-            else if (data.type === 'chat') {
-                // Relay chat message from client to ALL connected peers (including sender)
-                const broadcastPayload = { type: 'chat', username: data.username, text: data.text };
-                appendChatMessage(data.username, data.text, data.username === myUsername);
-                
-                // Send to all other clients
-                for (let peerId in connections) {
-                    if (connections[peerId].conn) {
-                        connections[peerId].conn.send(broadcastPayload);
-                    }
-                }
-            }
-        }
-
-        // --- CLIENT DATA HANDLER ---
-        function handleClientData(data) {
-            if (data.type === 'chat') {
-                appendChatMessage(data.username, data.text, data.username === myUsername);
-            } 
-            else if (data.type === 'user-list') {
-                roomPeersList = data.users;
-                updateClientPeerListUI();
-            } 
-            else if (data.type === 'kick') {
-                alert('You have been kicked by the host.');
-                location.reload();
-            }
-        }
-
-        // --- ADMIN / HOST ACTIONS ---
-        function kickUser(peerId) {
-            if (!isHost) return;
-            if (connections[peerId] && connections[peerId].conn) {
-                connections[peerId].conn.send({ type: 'kick' });
-                connections[peerId].conn.close();
-                appendSystemMessage(`Kicked ${connections[peerId].username}.`);
-                delete connections[peerId];
-                broadcastUserList();
-                updatePeerListUI();
-            }
-        }
-
-        function broadcastUserList() {
-            if (!isHost) return;
-            const users = [];
-            for (let peerId in connections) {
-                users.push({ id: peerId, username: connections[peerId].username, isHost: connections[peerId].isHost });
-            }
-            // Send user list to all clients
-            for (let peerId in connections) {
-                if (connections[peerId].conn) {
-                    connections[peerId].conn.send({ type: 'user-list', users: users });
-                }
-            }
-        }
-
-        // --- UI UPDATERS ---
-        function updatePeerListUI() {
-            const listEl = document.getElementById('peer-list');
-            listEl.innerHTML = '';
-            let count = 0;
-
-            for (let peerId in connections) {
-                count++;
-                const user = connections[peerId];
-                const li = document.createElement('li');
-                li.className = 'flex items-center justify-between text-xs py-1 px-2 rounded bg-slate-900 border border-slate-800/80';
-                li.innerHTML = `
-                    <span class="truncate font-medium">${user.username}</span>
-                    ${isHost && !user.isHost ? `<button onclick="kickUser('${peerId}')" class="text-red-400 hover:text-red-300 ml-2 font-bold px-1.5 py-0.5 rounded bg-red-950/50">Kick</button>` : ''}
-                `;
-                listEl.appendChild(li);
-            }
-            document.getElementById('user-count').innerText = count;
-        }
-
-        function updateClientPeerListUI() {
-            const listEl = document.getElementById('peer-list');
-            listEl.innerHTML = '';
-            document.getElementById('user-count').innerText = roomPeersList.length;
-
-            roomPeersList.forEach(user => {
-                const li = document.createElement('li');
-                li.className = 'flex items-center justify-between text-xs py-1 px-2 rounded bg-slate-900 border border-slate-800/80';
-                li.innerHTML = `<span class="truncate font-medium">${user.username}</span>`;
-                listEl.appendChild(li);
-            });
-        }
-
-        // --- MESSAGING ---
-        function sendMessage(event) {
-            event.preventDefault();
-            const input = document.getElementById('message-input');
-            const text = input.value.trim();
-            if (!text) return;
-
-            if (isHost) {
-                // Host handles and broadcasts locally + to everyone
-                appendChatMessage(myUsername + ' (Host)', text, true);
-                const payload = { type: 'chat', username: myUsername + ' (Host)', text: text };
-                for (let peerId in connections) {
-                    if (connections[peerId].conn) {
-                        connections[peerId].conn.send(payload);
-                    }
-                }
-            } else {
-                // Client sends message to Host
-                if (conn && conn.open) {
-                    conn.send({ type: 'chat', username: myUsername, text: text });
-                }
-            }
-            input.value = '';
-        }
-
-        function appendChatMessage(sender, text, isSelf) {
-            const container = document.getElementById('chat-messages');
-            const div = document.createElement('div');
-            div.className = `flex flex-col ${isSelf ? 'items-end' : 'items-start'}`;
-            div.innerHTML = `
-                <span class="text-[10px] text-slate-400 mb-0.5 px-1">${sender}</span>
-                <div class="max-w-[85%] px-3.5 py-2 rounded-2xl text-sm ${isSelf ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-100 rounded-bl-none'} break-words">${escapeHTML(text)}</div>
-            `;
-            container.appendChild(div);
-            container.scrollTop = container.scrollHeight;
-        }
-
-        function appendSystemMessage(text) {
-            const container = document.getElementById('chat-messages');
-            const div = document.createElement('div');
-            div.className = 'text-center my-1';
-            div.innerHTML = `<span class="text-[11px] bg-slate-950/80 text-slate-400 border border-slate-800/60 px-3 py-1 rounded-full">${escapeHTML(text)}</span>`;
-            container.appendChild(div);
-            container.scrollTop = container.scrollHeight;
-        }
-
-        function copyRoomCode() {
-            const codeInput = document.getElementById('display-room-code');
-            codeInput.select();
-            navigator.clipboard.writeText(codeInput.value);
-            alert('Room Code copied to clipboard!');
-        }
-
-        function leaveRoom() {
-            if (confirm('Are you sure you want to leave the room?')) {
-                location.reload();
-            }
-        }
-
-        function escapeHTML(str) {
-            return str.replace(/[&<>'"]/g, 
-                tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag)
-            );
-        }
-    </script>
+    <!-- App entry point (ES modules) -->
+    <script type="module" src="./src/js/app.js"></script>
 </body>
 </html>
