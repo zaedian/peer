@@ -230,14 +230,22 @@ export function focusMessageInput() {
 
 /* ---------- voice/video call overlay ---------- */
 
+let _callPeerName = 'Peer';
+
 export function showCallOverlay(peerName, video) {
+  _callPeerName = peerName || 'Peer';
   el('call-overlay')?.classList.remove('hidden');
   const nm = el('call-peer-name');
-  if (nm) nm.innerText = peerName;
-  el('remote-video')?.classList.toggle('hidden', !video);
-  el('local-video')?.classList.toggle('hidden', !video);
-  el('call-avatar') && (el('call-avatar').innerHTML = avatarHTML(peerName, 'avatar big'));
+  if (nm) nm.innerText = _callPeerName;
+  const rn = el('remote-name');
+  if (rn) rn.innerText = _callPeerName;
+  el('call-stage')?.classList.toggle('hidden', !video);
+  el('call-avatar') && (el('call-avatar').innerHTML = avatarHTML(_callPeerName, 'avatar big'));
+  el('remote-avatar') && (el('remote-avatar').innerHTML = avatarHTML(_callPeerName, 'avatar big'));
   el('voice-only')?.classList.toggle('hidden', video);
+  el('switch-btn')?.classList.toggle('hidden', !video);
+  setRemoteMute(false);
+  setRemoteCameraOff(false);
   setCallStatus(video ? 'Video call' : 'Voice call');
   setMuteUI(false);
   setCameraUI(false);
@@ -281,6 +289,17 @@ export function setCameraUI(off) {
     b.innerText = off ? '🚫' : '📷';
     b.setAttribute('aria-pressed', String(off));
   }
+}
+
+/** Remote peer muted/unmuted (via call-mute signal). */
+export function setRemoteMute(muted) {
+  el('remote-mic-badge')?.classList.toggle('hidden', !muted);
+}
+
+/** Remote camera on/off (via call-camera signal): avatar fallback tile. */
+export function setRemoteCameraOff(off) {
+  el('remote-video')?.classList.toggle('hidden', off);
+  el('remote-fallback')?.classList.toggle('hidden', !off);
 }
 
 export function showIncoming(username, video) {

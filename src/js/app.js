@@ -360,8 +360,11 @@ async function handleCallSignal(msg) {  if (!msg || !msg.type) return;
         }
       }
     }
-  } else if (msg.type === 'call-decline' || msg.type === 'call-end') {
-    if (outgoing && msg.from === outgoing.to) {
+  } else if (msg.type === 'call-mute') {
+    if (activePeer && msg.from === activePeer.id) ui.setRemoteMute(!!msg.muted);
+  } else if (msg.type === 'call-camera') {
+    if (activePeer && msg.from === activePeer.id) ui.setRemoteCameraOff(!!msg.off);
+  } else if (msg.type === 'call-decline' || msg.type === 'call-end') {    if (outgoing && msg.from === outgoing.to) {
       clearTimeout(outgoing.timer);
       outgoing = null;
       ui.hideCallOverlay();
@@ -592,10 +595,26 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('decline-btn')?.addEventListener('click', onDeclineCall);
   document.getElementById('hangup-btn')?.addEventListener('click', endActiveCall);
   document.getElementById('mute-btn')?.addEventListener('click', () => {
-    try { ui.setMuteUI(!!calls?.toggleMute()); } catch (_) {}
+    try {
+      const m = !!calls?.toggleMute();
+      ui.setMuteUI(m);
+      if (activePeer) manager?.sendCallSignal({ type: 'call-mute', to: activePeer.id, muted: m });
+    } catch (_) {}
   });
   document.getElementById('camera-btn')?.addEventListener('click', () => {
-    try { ui.setCameraUI(!!calls?.toggleCamera()); } catch (_) {}
+    try {
+      const off = !!calls?.toggleCamera();
+      ui.setCameraUI(off);
+      if (activePeer) manager?.sendCallSignal({ type: 'call-camera', to: activePeer.id, off });
+    } catch (_) {}
+  });
+  document.getElementById('switch-btn')?.addEventListener('click', async () => {
+    try {
+      await calls?.switchCamera();
+      ui.setCameraUI(false);
+    } catch (e) {
+      ui.appendSystemMessage('Could not switch camera: ' + (e?.message || e));
+    }
   });
 
   // Escape declines an incoming call, or hangs up an active one.

@@ -132,4 +132,39 @@ export class CallManager {
     tracks.forEach((t) => { t.enabled = !this.cameraOff; });
     return this.cameraOff;
   }
+
+  /** Mobile-style rear/front camera flip (video calls only). */
+  async switchCamera() {
+    if (!this.active) throw new Error('No active call');
+    const oldTrack = this.active.stream.getVideoTracks()[0];
+    if (!oldTrack) throw new Error('No camera in this call');
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('No camera API.');
+    const cur = oldTrack.getSettings().facingMode || 'user';
+    const next = cur === 'user' ? 'environment' : 'user';
+    let ns = null;
+    try {
+      ns = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { exact: next } },
+      });
+    } catch (_) {
+      // Device without that lens (e.g. desktop): try a plain re-acquire.
+      ns = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+    }
+    const newTrack = ns.getVideoTracks()[0];
+    if (!newTrack) throw new Error('Could not open camera.');
+    try {
+      const pc = this.active.call?.peerConnection;
+      const sender = pc?.getSenders?.().find((s) => s.track && s.track.kind === 'video');
+      if (sender?.replaceTrack) await sender.replaceTrack(newTrack);
+    } catch (_) { /* keep the local preview even if replace fails */ }
+    try {
+      this.active.stream.removeTrack(oldTrack);
+      oldTrack.stop();
+    } catch (_) {}
+    this.active.stream.addTrack(newTrack);
+    this.cameraOff = false;
+    this.deps.onLocalStream?.(this.active.stream);
+    return next;
+  }
 }

@@ -422,16 +422,61 @@ button:focus-visible, input:focus-visible {
 }
 .call-avatar { display: flex; justify-content: center; margin-bottom: 6px; }
 .avatar.big { width: 64px; height: 64px; font-size: 26px; }
-.call-videos { display: flex; gap: 8px; margin: 14px 0 4px; }
+/* WhatsApp-style stage: big remote tile, local picture-in-picture. */
+.call-videos { position: relative; margin: 14px 0 4px; }
+.video-tile { position: relative; }
 .call-video {
   width: 100%;
-  aspect-ratio: 4 / 3;
   object-fit: cover;
   border-radius: 14px;
   background: #000;
   border: 1px solid var(--border);
 }
+.call-video.remote { aspect-ratio: 3 / 4; max-height: 52vh; }
+.local-tile {
+  position: absolute;
+  right: 10px;
+  bottom: 44px;
+  width: 104px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  background: #000;
+}
+.local-tile .call-video {
+  border: none;
+  border-radius: 0;
+  aspect-ratio: 3 / 4;
+}
 .call-video.local { transform: scaleX(-1); }
+.tile-bar {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(2, 6, 23, 0.65);
+  border: 1px solid var(--border);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.mic-badge { font-size: 12px; }
+.remote-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  background: #0b1222;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+}
 .call-controls { display: flex; gap: 12px; justify-content: center; margin-top: 14px; }
 .call-btn {
   width: 52px;
